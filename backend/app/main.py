@@ -243,7 +243,8 @@ async def analyze_reading(
             audio_bytes=audio_bytes,
             filename=filename,
             language=language,
-            estimated_duration=duration_seconds
+            estimated_duration=duration_seconds,
+            reference_text=reference_text
         )
         transcribed_text = stt_result.get("text", "")
         transcribed_words = stt_result.get("words", [])
@@ -368,7 +369,8 @@ async def evaluate_retest(
             audio_bytes=audio_bytes,
             filename=filename,
             language=language or "hi",
-            estimated_duration=duration_seconds
+            estimated_duration=duration_seconds,
+            reference_text=remediation_passage_text
         )
         transcribed_text = stt_result.get("text", "")
         transcribed_words = stt_result.get("words", [])

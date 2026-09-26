@@ -1,8 +1,26 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, Square, Loader2, RotateCcw, Volume2, AlertCircle, HelpCircle } from 'lucide-react';
-import { AudioRecordingService } from '@/utils/audio';
+import {
+  Mic,
+  Square,
+  Loader2,
+  RotateCcw,
+  Volume2,
+  AlertCircle,
+  HelpCircle,
+  Settings2,
+  RefreshCw,
+  Sliders,
+  ShieldAlert
+} from 'lucide-react';
+import {
+  AudioRecordingService,
+  AudioInputDevice,
+  AudioTrackSettingsInfo,
+  VolumeMeasurement,
+  getAudioInputDevices,
+} from '@/utils/audio';
 
 interface AudioControlsProps {
   language: 'en' | 'hi';
@@ -10,7 +28,6 @@ interface AudioControlsProps {
   onAnalysisComplete: (audioBlob: Blob, clientTranscript: string, durationSeconds: number) => void;
   onReset: () => void;
   onRecordingStateChange?: (isRecording: boolean) => void;
-  onLiveTranscriptChange?: (text: string) => void;
   isAnalyzing: boolean;
   disabled?: boolean;
 }
@@ -21,25 +38,55 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
   onAnalysisComplete,
   onReset,
   onRecordingStateChange,
-  onLiveTranscriptChange,
   isAnalyzing,
   disabled = false,
 }) => {
+  // Device Selection & Hardware Track Metadata
+  const [devices, setDevices] = useState<AudioInputDevice[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('default');
+  const [activeTrackSettings, setActiveTrackSettings] = useState<AudioTrackSettingsInfo | null>(null);
+  const [isHardwareMuted, setIsHardwareMuted] = useState(false);
+
+  // Recording State & Volume Metrics
   const [isRecording, setIsRecording] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [liveTranscript, setLiveTranscript] = useState('');
+  const [volumeMeasurement, setVolumeMeasurement] = useState<VolumeMeasurement>({
+    rms: 0,
+    dB: -90,
+    normalized: 0,
+    isSilent: true,
+  });
+
   const [micError, setMicError] = useState<string | null>(null);
   const [silenceWarning, setSilenceWarning] = useState(false);
 
   const recordingServiceRef = useRef<AudioRecordingService | null>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // 1. Enumerate microphones on mount and listen to device changes
+  const refreshDevices = async () => {
+    try {
+      const list = await getAudioInputDevices();
+      setDevices(list);
+      if (list.length > 0 && selectedDeviceId === 'default') {
+        setSelectedDeviceId(list[0].deviceId);
+      }
+    } catch (e) {
+      console.warn('Could not enumerate audio devices:', e);
+    }
+  };
+
   useEffect(() => {
     recordingServiceRef.current = new AudioRecordingService();
-    return () => {
-      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-    };
+    refreshDevices();
+
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices) {
+      navigator.mediaDevices.addEventListener('devicechange', refreshDevices);
+      return () => {
+        navigator.mediaDevices.removeEventListener('devicechange', refreshDevices);
+        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+      };
+    }
   }, []);
 
   const startTimer = () => {
@@ -48,8 +95,8 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
     timerIntervalRef.current = setInterval(() => {
       setElapsedSeconds((prev) => {
         const next = prev + 1;
-        // If 4 seconds passed and audio level is consistently 0, gently warn
-        if (next >= 4 && audioLevel < 5) {
+        // If 4 seconds have passed with 0 RMS audio, warn about hardware mute
+        if (next >= 4 && volumeMeasurement.isSilent) {
           setSilenceWarning(true);
         }
         return next;
@@ -66,38 +113,50 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
 
   const handleStartRecording = async () => {
     setMicError(null);
-    setLiveTranscript('');
     setSilenceWarning(false);
+    setIsHardwareMuted(false);
 
     try {
       if (!recordingServiceRef.current) {
         recordingServiceRef.current = new AudioRecordingService();
       }
 
-      await recordingServiceRef.current.startRecording(
-        language,
-        (transcript) => {
-          setLiveTranscript(transcript);
-          if (onLiveTranscriptChange) onLiveTranscriptChange(transcript);
+      // Start recording with explicit deviceId & real RMS listener
+      const trackSettings = await recordingServiceRef.current.startRecording({
+        deviceId: selectedDeviceId !== 'default' ? selectedDeviceId : undefined,
+        onVolumeChange: (measurement) => {
+          setVolumeMeasurement(measurement);
+          if (!measurement.isSilent) {
+            setSilenceWarning(false);
+          }
         },
-        (level) => {
-          setAudioLevel(level);
-          if (level > 10) setSilenceWarning(false);
-        }
-      );
+        onTrackMuteChange: (muted) => {
+          setIsHardwareMuted(muted);
+        },
+        onTrackEnded: () => {
+          setMicError('Microphone was unplugged or disconnected.');
+          handleStopRecording();
+        },
+      });
+
+      setActiveTrackSettings(trackSettings);
+      setIsHardwareMuted(trackSettings.isMuted);
 
       setIsRecording(true);
       if (onRecordingStateChange) onRecordingStateChange(true);
       startTimer();
+
+      // Refresh devices now that permission is granted (to get actual device labels)
+      refreshDevices();
     } catch (err: any) {
       console.error('Failed to access microphone:', err);
       let message = 'Could not access your microphone.';
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        message = 'Microphone permission denied. Click the lock/camera icon next to the URL bar in your browser to Allow microphone access, then try again.';
+        message = 'Microphone permission denied. Click the lock icon in your browser URL bar to Allow microphone access.';
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        message = 'No microphone device detected. Please connect a headset or microphone.';
+        message = 'No microphone device detected. Please connect an input device.';
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        message = 'Microphone is currently in use by another application. Please close other recording apps and try again.';
+        message = 'Microphone is busy or locked by another application (PulseAudio/ALSA/another browser tab).';
       } else if (err.message) {
         message = err.message;
       }
@@ -115,8 +174,9 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
 
     const duration = Math.max(elapsedSeconds, 1);
     try {
-      const { audioBlob, clientTranscript } = await recordingServiceRef.current.stopRecording();
-      onAnalysisComplete(audioBlob, clientTranscript || liveTranscript, duration);
+      // MediaRecorder is strictly the single source of truth for audio
+      const { audioBlob } = await recordingServiceRef.current.stopRecording();
+      onAnalysisComplete(audioBlob, '', duration);
     } catch (err: any) {
       console.error('Failed to finalize audio capture:', err);
       onReset();
@@ -128,9 +188,11 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
     setIsRecording(false);
     if (onRecordingStateChange) onRecordingStateChange(false);
     setElapsedSeconds(0);
-    setLiveTranscript('');
     setMicError(null);
     setSilenceWarning(false);
+    setIsHardwareMuted(false);
+    setActiveTrackSettings(null);
+    setVolumeMeasurement({ rms: 0, dB: -90, normalized: 0, isSilent: true });
     onReset();
   };
 
@@ -141,28 +203,86 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
   };
 
   return (
-    <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
+    <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4">
+      {/* Hardware Mute Alert */}
+      {isHardwareMuted && (
+        <div className="p-3.5 rounded-2xl bg-amber-500 text-white text-xs font-bold flex items-center gap-2 animate-bounce">
+          <ShieldAlert className="w-5 h-5 flex-shrink-0" />
+          <span>
+            ⚠️ HARDWARE/OS MUTE DETECTED: The operating system reports this microphone track is MUTED. Please unmute your mic switch or system slider.
+          </span>
+        </div>
+      )}
+
+      {/* Error Alert */}
       {micError && (
-        <div className="mb-4 p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-start gap-2.5 animate-in fade-in">
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-start gap-2.5 animate-in fade-in">
           <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
           <div className="flex-1">
-            <div className="font-bold">Microphone Access Error</div>
+            <div className="font-bold">Microphone Hardware Error</div>
             <div className="mt-0.5">{micError}</div>
           </div>
         </div>
       )}
 
+      {/* Silence Warning */}
       {silenceWarning && isRecording && (
-        <div className="mb-4 p-3 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-medium flex items-center gap-2 animate-in fade-in">
+        <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-medium flex items-center gap-2 animate-in fade-in">
           <HelpCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
           <span>
-            No voice input detected. If using Linux, check system volume settings (e.g. <code>pavucontrol</code>) or ensure mic is unmuted.
+            Zero signal power detected (RMS &lt; 0.002). Verify your input volume in Linux sound settings (<code>pavucontrol</code>) or select a different microphone below.
           </span>
         </div>
       )}
 
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-5">
-        {/* Status and Audio Level Meter */}
+      {/* Deterministic Microphone Selection & Hardware Inspector */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-2xl bg-slate-50 border border-slate-200 text-xs">
+        <div className="flex items-center gap-2 flex-1 min-w-[240px]">
+          <Sliders className="w-4 h-4 text-slate-500 flex-shrink-0" />
+          <span className="font-bold text-slate-700 whitespace-nowrap">Input Device:</span>
+          <select
+            value={selectedDeviceId}
+            onChange={(e) => setSelectedDeviceId(e.target.value)}
+            disabled={isRecording || isAnalyzing}
+            className="flex-1 px-3 py-1.5 rounded-xl border border-slate-300 bg-white text-slate-800 font-medium text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+          >
+            {devices.map((d) => (
+              <option key={d.deviceId} value={d.deviceId}>
+                {d.label}
+              </option>
+            ))}
+            {devices.length === 0 && (
+              <option value="default">Default System Microphone</option>
+            )}
+          </select>
+
+          <button
+            onClick={refreshDevices}
+            disabled={isRecording || isAnalyzing}
+            className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-200 text-slate-600 transition-colors"
+            title="Refresh microphone list"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* Real Hardware Track Settings Badge */}
+        {activeTrackSettings && (
+          <div className="flex items-center gap-2 text-[11px] font-mono px-3 py-1 rounded-xl bg-slate-200/70 text-slate-800">
+            <span>SR: <strong>{activeTrackSettings.sampleRate || 'auto'} Hz</strong></span>
+            <span>•</span>
+            <span>CH: <strong>{activeTrackSettings.channelCount || 1}</strong></span>
+            <span>•</span>
+            <span className={activeTrackSettings.isMuted ? 'text-rose-600 font-bold' : 'text-emerald-700 font-bold'}>
+              {activeTrackSettings.isMuted ? 'MUTED' : 'ACTIVE'}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Main Record Control Bar */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-5 pt-1">
+        {/* Status and True RMS Level Meter */}
         <div className="flex items-center gap-4 w-full sm:w-auto">
           <div
             className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all ${
@@ -186,9 +306,9 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
             <div className="flex items-center gap-2">
               <h3 className="font-bold text-slate-800 text-base">
                 {isRecording
-                  ? 'Recording in Progress...'
+                  ? 'Recording Audio (Source of Truth)...'
                   : isAnalyzing
-                  ? 'Analyzing Reading Audio...'
+                  ? 'Analyzing Audio on Server...'
                   : 'Ready to Read Aloud'}
               </h3>
               {isRecording && (
@@ -198,28 +318,33 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
               )}
             </div>
 
-            {/* Audio Wave level bar */}
+            {/* True RMS & dBFS Progress Bar */}
             {isRecording ? (
-              <div className="flex items-center gap-2 mt-1.5">
-                <div className="w-36 h-2.5 rounded-full bg-slate-100 overflow-hidden p-0.5 border border-slate-200">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-yellow-500 to-rose-500 transition-all duration-75"
-                    style={{ width: `${Math.max(8, audioLevel)}%` }}
-                  />
+              <div className="space-y-1 mt-1.5">
+                <div className="flex items-center gap-2">
+                  <div className="w-44 h-2.5 rounded-full bg-slate-100 overflow-hidden p-0.5 border border-slate-200">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-yellow-500 to-rose-500 transition-all duration-75"
+                      style={{ width: `${Math.max(4, volumeMeasurement.normalized)}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] font-mono text-slate-500 whitespace-nowrap">
+                    {volumeMeasurement.dB > -80 ? `${volumeMeasurement.dB} dBFS` : '-∞ dBFS'}
+                  </span>
                 </div>
-                <span className="text-[11px] text-slate-500 font-bold">
-                  {audioLevel > 15 ? '🟢 Speaking' : 'Listening...'}
-                </span>
+                <div className="text-[10px] font-mono text-slate-400">
+                  RMS: <strong>{volumeMeasurement.rms}</strong> • {volumeMeasurement.isSilent ? 'Silent' : 'Signal Present'}
+                </div>
               </div>
             ) : (
               <p className="text-xs text-slate-500 mt-0.5">
-                Press start, read clearly into your mic, then tap finish.
+                Microphone audio will be processed by the speech engine upon pressing Stop.
               </p>
             )}
           </div>
         </div>
 
-        {/* Action Buttons */}
+        {/* Buttons */}
         <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
           <button
             onClick={handleReset}

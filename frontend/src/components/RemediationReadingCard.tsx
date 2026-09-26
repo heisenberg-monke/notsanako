@@ -135,7 +135,6 @@ export const RemediationReadingCard: React.FC<RemediationReadingCardProps> = ({
         onAnalysisComplete={onAnalysisComplete}
         onReset={onReset}
         onRecordingStateChange={(rec) => setIsRecording(rec)}
-        onLiveTranscriptChange={(txt) => setLiveTranscript(txt)}
         isAnalyzing={isAnalyzing}
       />
     </div>

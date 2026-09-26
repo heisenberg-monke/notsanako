@@ -581,7 +581,6 @@ export default function Home() {
               passage={selectedPassage}
               alignments={baselineAnalysis?.alignments}
               isRecording={isRecording}
-              liveTranscript={liveTranscript}
             />
 
             <AudioControls
@@ -590,7 +589,6 @@ export default function Home() {
               onAnalysisComplete={handleBaselineAudioComplete}
               onReset={handleResetAll}
               onRecordingStateChange={(rec) => setIsRecording(rec)}
-              onLiveTranscriptChange={(txt) => setLiveTranscript(txt)}
               isAnalyzing={isAnalyzing}
             />
           </>

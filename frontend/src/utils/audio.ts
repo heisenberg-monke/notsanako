@@ -1,87 +1,186 @@
 /**
- * Resilient Audio Recording and Speech Processing Utilities.
- * Handles Linux / ALSA / PulseAudio / PipeWire hardware quirks gracefully:
- * - Uses soft 'ideal' constraints with fallback to { audio: true }
- * - Safely initializes AudioContext with explicit resume() on user gesture
- * - Boosts volume meter sensitivity so voice input is clearly visible
- * - Universal MediaRecorder MIME type detection
+ * Deterministic Audio Recording Engine.
+ * 
+ * Architectural Highlights:
+ * 1. Explicit device enumeration via navigator.mediaDevices.enumerateDevices().
+ * 2. Hardware deviceId passing into getUserMedia().
+ * 3. Inspects and exposes track.getSettings() (actual sampleRate, channelCount, deviceId).
+ * 4. Listens to track.onmute, track.onunmute, and track.onended for deterministic hardware state.
+ * 5. Time-domain Root Mean Square (RMS) & dBFS measurement (no heuristic frequency bin averaging).
+ * 6. MediaRecorder audio blob is strictly the single source of truth.
  */
+
+export interface AudioInputDevice {
+  deviceId: string;
+  label: string;
+  groupId?: string;
+}
+
+export interface AudioTrackSettingsInfo {
+  deviceId?: string;
+  label: string;
+  sampleRate?: number;
+  channelCount?: number;
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+  isMuted: boolean;
+  readyState: MediaStreamTrackState;
+}
+
+export interface VolumeMeasurement {
+  rms: number;          // Root Mean Square linear (0.0 to 1.0)
+  dB: number;           // Decibels relative to Full Scale (-Infinity to 0 dBFS)
+  normalized: number;   // 0 to 100 percentage scaled from noise floor (-50 dBFS) to peak (-3 dBFS)
+  isSilent: boolean;    // True if signal power is below acoustic threshold
+}
+
+/**
+ * Enumerates all connected audio input microphones.
+ */
+export async function getAudioInputDevices(): Promise<AudioInputDevice[]> {
+  if (typeof window === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+    return [];
+  }
+
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioInputs = devices.filter((d) => d.kind === 'audioinput');
+
+    return audioInputs.map((d, index) => ({
+      deviceId: d.deviceId,
+      label: d.label || `Microphone ${index + 1} (${d.deviceId ? d.deviceId.slice(0, 8) + '...' : 'Default'})`,
+      groupId: d.groupId,
+    }));
+  } catch (err) {
+    console.error('Failed to enumerate audio devices:', err);
+    return [];
+  }
+}
 
 export class AudioRecordingService {
   private mediaStream: MediaStream | null = null;
+  private audioTrack: MediaStreamTrack | null = null;
   private audioContext: AudioContext | null = null;
   private mediaRecorder: MediaRecorder | null = null;
   private audioChunks: Blob[] = [];
   private analyser: AnalyserNode | null = null;
-  private speechRecognition: any = null;
-  private liveTranscript: string = '';
-  private onTranscriptUpdate?: (text: string) => void;
-  private onVolumeChange?: (level: number) => void;
   private animationFrameId?: number;
   private isCurrentlyRecording: boolean = false;
 
+  // Event callbacks
+  private onVolumeChange?: (measurement: VolumeMeasurement) => void;
+  private onTrackMuteChange?: (isMuted: boolean) => void;
+  private onTrackEnded?: () => void;
+
   /**
-   * Initializes microphone stream with robust fallbacks.
+   * Initializes microphone stream with specified deviceId.
    */
   async startRecording(
-    language: 'en' | 'hi' = 'en',
-    onTranscriptUpdate?: (text: string) => void,
-    onVolumeChange?: (level: number) => void
-  ): Promise<void> {
+    options: {
+      deviceId?: string;
+      onVolumeChange?: (measurement: VolumeMeasurement) => void;
+      onTrackMuteChange?: (isMuted: boolean) => void;
+      onTrackEnded?: () => void;
+    } = {}
+  ): Promise<AudioTrackSettingsInfo> {
     this.audioChunks = [];
-    this.liveTranscript = '';
-    this.onTranscriptUpdate = onTranscriptUpdate;
-    this.onVolumeChange = onVolumeChange;
     this.isCurrentlyRecording = true;
+    this.onVolumeChange = options.onVolumeChange;
+    this.onTrackMuteChange = options.onTrackMuteChange;
+    this.onTrackEnded = options.onTrackEnded;
 
-    // 1. Request microphone with fallback for Linux / browser device constraints
+    // 1. Build deterministic audio constraints
+    const audioConstraints: MediaTrackConstraints = {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    };
+
+    if (options.deviceId && options.deviceId !== 'default') {
+      audioConstraints.deviceId = { exact: options.deviceId };
+    }
+
     try {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: { ideal: 1 },
-          sampleRate: { ideal: 16000 },
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        audio: audioConstraints,
       });
-    } catch (constraintErr) {
-      console.warn('Constrained getUserMedia failed, falling back to basic audio:', constraintErr);
-      // Fallback: request unconstrained audio (compatible with 100% of working input devices)
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err: any) {
+      // If exact deviceId or advanced constraint fails, retry with soft constraint
+      if (options.deviceId && options.deviceId !== 'default') {
+        console.warn(`Exact deviceId constraint failed (${err.name}), retrying with ideal deviceId...`);
+        this.mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { ideal: options.deviceId } },
+        });
+      } else {
+        throw err;
+      }
     }
 
-    // Verify audio track is active and not muted
-    const audioTracks = this.mediaStream.getAudioTracks();
-    if (audioTracks.length === 0 || !audioTracks[0].enabled) {
-      throw new Error('No active microphone audio track found.');
+    // 2. Extract and inspect the active audio track
+    const tracks = this.mediaStream.getAudioTracks();
+    if (tracks.length === 0) {
+      throw new Error('No audio tracks returned from microphone stream.');
     }
 
-    // 2. Setup Web Audio Analyser with explicit resume() for level visualization
+    this.audioTrack = tracks[0];
+
+    // 3. Register deterministic hardware event listeners
+    this.audioTrack.onmute = () => {
+      console.warn(`[Audio Engine] Hardware/OS MUTED track: ${this.audioTrack?.label} (${this.audioTrack?.id})`);
+      this.onTrackMuteChange?.(true);
+    };
+
+    this.audioTrack.onunmute = () => {
+      console.info(`[Audio Engine] Hardware/OS UNMUTED track: ${this.audioTrack?.label} (${this.audioTrack?.id})`);
+      this.onTrackMuteChange?.(false);
+    };
+
+    this.audioTrack.onended = () => {
+      console.warn(`[Audio Engine] Track ENDED / Disconnected: ${this.audioTrack?.label} (${this.audioTrack?.id})`);
+      this.onTrackEnded?.();
+    };
+
+    // 4. Retrieve and log track settings
+    const settings = this.audioTrack.getSettings();
+    const trackInfo: AudioTrackSettingsInfo = {
+      deviceId: settings.deviceId,
+      label: this.audioTrack.label || 'Default Microphone',
+      sampleRate: settings.sampleRate,
+      channelCount: settings.channelCount,
+      echoCancellation: settings.echoCancellation,
+      noiseSuppression: settings.noiseSuppression,
+      autoGainControl: settings.autoGainControl,
+      isMuted: this.audioTrack.muted,
+      readyState: this.audioTrack.readyState,
+    };
+
+    console.info('[Audio Engine] Active Track Settings:', trackInfo);
+
+    // 5. Setup Web Audio Analyser for True RMS Measurement
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       this.audioContext = new AudioContextClass();
-      
+
       if (this.audioContext.state === 'suspended') {
         await this.audioContext.resume();
       }
 
       const source = this.audioContext.createMediaStreamSource(this.mediaStream);
       this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 256;
-      this.analyser.smoothingTimeConstant = 0.5;
+      this.analyser.fftSize = 1024; // High time-domain resolution for RMS
       source.connect(this.analyser);
 
       if (this.onVolumeChange) {
-        this.monitorAudioLevel();
+        this.monitorTimeDomainRMS();
       }
-    } catch (audioCtxErr) {
-      console.warn('Web Audio level monitoring failed, recording will still continue:', audioCtxErr);
+    } catch (ctxErr) {
+      console.warn('[Audio Engine] Web Audio Analyser initialization warning:', ctxErr);
     }
 
-    // 3. MediaRecorder setup with multi-codec detection
+    // 6. Setup MediaRecorder as the authoritative single source of truth
     let mimeType = '';
-    const preferredTypes = [
+    const preferredMimes = [
       'audio/webm;codecs=opus',
       'audio/webm',
       'audio/ogg;codecs=opus',
@@ -89,134 +188,123 @@ export class AudioRecordingService {
       ''
     ];
 
-    for (const type of preferredTypes) {
-      if (!type || MediaRecorder.isTypeSupported(type)) {
-        mimeType = type;
+    for (const m of preferredMimes) {
+      if (!m || MediaRecorder.isTypeSupported(m)) {
+        mimeType = m;
         break;
       }
     }
 
-    const options: MediaRecorderOptions = mimeType ? { mimeType } : {};
-    this.mediaRecorder = new MediaRecorder(this.mediaStream, options);
+    const mrOptions: MediaRecorderOptions = mimeType ? { mimeType } : {};
+    this.mediaRecorder = new MediaRecorder(this.mediaStream, mrOptions);
 
-    this.mediaRecorder.ondataavailable = (event) => {
+    this.mediaRecorder.ondataavailable = (event: BlobEvent) => {
       if (event.data && event.data.size > 0) {
         this.audioChunks.push(event.data);
       }
     };
 
-    // Request data every 250ms
+    // Capture in 250ms chunks
     this.mediaRecorder.start(250);
 
-    // 4. Start live speech recognition preview if supported
-    this.startLiveSpeechRecognition(language);
+    return trackInfo;
   }
 
-  private startLiveSpeechRecognition(language: 'en' | 'hi') {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+  /**
+   * Real Root Mean Square (RMS) & dBFS calculation using Float32 Time-Domain signal samples.
+   */
+  private monitorTimeDomainRMS() {
+    if (!this.analyser || !this.isCurrentlyRecording) return;
 
-    try {
-      this.speechRecognition = new SpeechRecognition();
-      this.speechRecognition.continuous = true;
-      this.speechRecognition.interimResults = true;
-      this.speechRecognition.lang = language === 'hi' ? 'hi-IN' : 'en-IN';
+    const bufferLength = this.analyser.fftSize;
+    const timeDomainData = new Float32Array(bufferLength);
 
-      this.speechRecognition.onresult = (event: any) => {
-        let transcript = '';
-        for (let i = 0; i < event.results.length; i++) {
-          transcript += event.results[i][0].transcript + ' ';
-        }
-        this.liveTranscript = transcript.trim();
-        if (this.onTranscriptUpdate) {
-          this.onTranscriptUpdate(this.liveTranscript);
-        }
-      };
-
-      this.speechRecognition.onerror = (err: any) => {
-        // Soft error handling - Linux Chromium often warns on network STT
-        console.info('SpeechRecognition note:', err.error);
-      };
-
-      this.speechRecognition.start();
-    } catch (e) {
-      console.warn('SpeechRecognition failed to start:', e);
-    }
-  }
-
-  private monitorAudioLevel() {
-    if (!this.analyser || !this.onVolumeChange) return;
-
-    const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
     const update = () => {
       if (!this.analyser || !this.isCurrentlyRecording) return;
-      this.analyser.getByteFrequencyData(dataArray);
 
-      let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) {
-        sum += dataArray[i];
+      // Extract time-domain waveform in range [-1.0, 1.0]
+      this.analyser.getFloatTimeDomainData(timeDomainData);
+
+      // Compute RMS = sqrt( (1/N) * sum(x_i^2) )
+      let sumOfSquares = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const val = timeDomainData[i];
+        sumOfSquares += val * val;
       }
-      const average = sum / dataArray.length;
+      const rms = Math.sqrt(sumOfSquares / bufferLength);
 
-      // Sensitive scaling so speaking is clearly reflected (0 to 100)
-      const scaled = Math.min(100, Math.round(average * 2.2));
-      this.onVolumeChange!(scaled);
+      // Compute dBFS (decibels relative to full scale)
+      // Clamped to floor of -90 dBFS
+      const dB = rms > 0.00001 ? 20 * Math.log10(rms) : -90;
 
+      // Map range: -50 dBFS (quiet room noise) to -4 dBFS (loud speech) -> 0 to 100%
+      const minDb = -50;
+      const maxDb = -4;
+      let normalized = 0;
+      if (dB > minDb) {
+        normalized = Math.min(100, Math.max(0, Math.round(((dB - minDb) / (maxDb - minDb)) * 100)));
+      }
+
+      const measurement: VolumeMeasurement = {
+        rms: Math.round(rms * 1000) / 1000,
+        dB: Math.round(dB * 10) / 10,
+        normalized,
+        isSilent: rms < 0.002, // Below ~ -54 dBFS
+      };
+
+      this.onVolumeChange?.(measurement);
       this.animationFrameId = requestAnimationFrame(update);
     };
+
     update();
   }
 
   /**
-   * Stops recording and returns the captured audio Blob + live transcript.
+   * Stops recording and returns the raw audio Blob as the single source of truth.
    */
-  async stopRecording(): Promise<{ audioBlob: Blob; clientTranscript: string }> {
+  async stopRecording(): Promise<{ audioBlob: Blob; mimeType: string }> {
     this.isCurrentlyRecording = false;
 
     if (this.animationFrameId) {
       cancelAnimationFrame(this.animationFrameId);
     }
 
-    if (this.speechRecognition) {
-      try {
-        this.speechRecognition.stop();
-      } catch (e) {
-        // Ignore stop error
-      }
-    }
-
     return new Promise((resolve) => {
-      if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
-        const fallbackBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+      const finalize = () => {
+        const finalMime = this.mediaRecorder?.mimeType || 'audio/webm';
+        const blob = new Blob(this.audioChunks, { type: finalMime });
         this.cleanup();
-        resolve({ audioBlob: fallbackBlob, clientTranscript: this.liveTranscript });
+        resolve({ audioBlob: blob, mimeType: finalMime });
+      };
+
+      if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
+        finalize();
         return;
       }
 
-      this.mediaRecorder.onstop = () => {
-        const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
-        const finalBlob = new Blob(this.audioChunks, { type: mimeType });
-        this.cleanup();
-        resolve({ audioBlob: finalBlob, clientTranscript: this.liveTranscript });
-      };
-
+      this.mediaRecorder.onstop = finalize;
       this.mediaRecorder.stop();
     });
   }
 
   private cleanup() {
     if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach((track) => track.stop());
+      this.mediaStream.getTracks().forEach((track) => {
+        track.stop();
+      });
       this.mediaStream = null;
     }
+    this.audioTrack = null;
+
     if (this.audioContext && this.audioContext.state !== 'closed') {
       try {
         this.audioContext.close();
       } catch (e) {
-        // Ignore close error
+        // Ignore
       }
       this.audioContext = null;
     }
+
     this.mediaRecorder = null;
     this.analyser = null;
   }
