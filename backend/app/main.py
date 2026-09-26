@@ -2,33 +2,64 @@
 FastAPI Backend for Adaptive Reading Coach.
 Complete Adaptive Remediation Cycle:
 Baseline -> Diagnose -> Micro-Feedback -> Generate Personalized Story (Gemini 1.5) -> Retest -> Delta Evaluation.
+
+Teacher Ecosystem:
+PostgreSQL/SQLite-backed roster management, class dashboard analytics,
+automated 4 PM IST daily digest, and Resend email delivery.
 """
 
 import os
 import sqlite3
 import json
+from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
+load_dotenv()
+
 from app.passages import get_all_passages, get_passage_by_id
 from app.alignment import evaluate_reading_attempt_indic
-from app.stt_service import stt_service, STTConfigurationError
+from app.stt_service import (
+    stt_service,
+    STTNotConfiguredError,
+    STTProviderError,
+    STTTimeoutError,
+    STTEmptyTranscriptionError,
+)
+# Back-compat alias: earlier code used STTConfigurationError
+STTConfigurationError = STTNotConfiguredError
 from app.remediation import (
     rank_and_select_target_words,
     generate_remediation_story_gemini,
     calculate_remediation_delta
 )
+from app.db import init_db
+from app.scheduler import start_scheduler, stop_scheduler
+from app.routers.teacher import router as teacher_router
 
-load_dotenv()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: init DB tables + start digest scheduler. Shutdown: stop scheduler."""
+    init_db()
+    start_scheduler()
+    yield
+    stop_scheduler()
+
 
 app = FastAPI(
     title="Adaptive Reading Coach API",
-    description="Closed-Loop Indic Oral Reading Fluency & Adaptive Remediation Cycle",
-    version="2.5.0"
+    description="Closed-Loop Indic Oral Reading Fluency & Adaptive Remediation Cycle + Teacher Ecosystem",
+    version="3.0.0",
+    lifespan=lifespan,
 )
+
+# Teacher ecosystem routes
+app.include_router(teacher_router)
+
 
 # Enable CORS for Next.js frontend
 app.add_middleware(
@@ -43,7 +74,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "reading_coach.db")
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reading_sessions (
@@ -99,7 +130,7 @@ def save_session_and_errors(
     metrics: Dict[str, Any],
     structured_errors: List[Dict[str, Any]]
 ) -> int:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO reading_sessions (student_id, passage_id, accuracy_pct, wcpm, wpm, duration_sec)
@@ -133,8 +164,69 @@ def save_session_and_errors(
             1 if err.get("in_stumble_cluster") else 0
         ))
 
+    # Commit and close the raw connection BEFORE opening any SQLAlchemy session.
+    # SQLite only allows one writer at a time; leaving this connection open while
+    # SQLAlchemy also writes causes "database is locked".
     conn.commit()
     conn.close()
+
+    # Dual-write into SQLAlchemy ORM tables for the teacher ecosystem
+    try:
+        from app.db import SessionLocal
+        from app import models
+        with SessionLocal() as orm_db:
+            # Check or create default student if student_id does not exist
+            student = orm_db.query(models.Student).filter(models.Student.id == student_id).first()
+            if not student:
+                # Assign to default classroom
+                first_class = orm_db.query(models.Classroom).first()
+                if first_class:
+                    student = models.Student(
+                        id=student_id,
+                        classroom_id=first_class.id,
+                        display_name="Student " + student_id,
+                        grade_level=first_class.grade_level
+                    )
+                    orm_db.add(student)
+                    orm_db.commit()
+
+            if student:
+                orm_session = models.PracticeSession(
+                    student_id=student.id,
+                    passage_id=passage_id,
+                    total_words_read=int(metrics.get("wpm", 0.0) * (metrics.get("duration_seconds", 0.0) / 60.0)),
+                    avg_wcpm=metrics.get("wcpm", 0.0),
+                    completed_retest=False,
+                )
+                orm_db.add(orm_session)
+                orm_db.flush()
+
+                attempt = models.ReadingAttempt(
+                    session_id=orm_session.id,
+                    passage_type="BASELINE",
+                    wcpm=metrics.get("wcpm", 0.0),
+                    accuracy_percentage=metrics.get("accuracy_percentage", 0.0),
+                    duration_seconds=metrics.get("duration_seconds", 0.0),
+                )
+                orm_db.add(attempt)
+                orm_db.flush()
+
+                for err in structured_errors:
+                    orm_db.add(models.ErrorLog(
+                        attempt_id=attempt.id,
+                        word=err.get("word", ""),
+                        spoken_word=err.get("spoken_word", ""),
+                        error_type=err.get("error_type", "SUBSTITUTION"),
+                        target_pattern=err.get("target_pattern"),
+                        linguistic_detail=err.get("linguistic_detail"),
+                        pedagogical_remedy=err.get("pedagogical_remedy"),
+                        in_stumble_cluster=bool(err.get("in_stumble_cluster")),
+                        corrected_in_retest=False,
+                    ))
+                orm_db.commit()
+    except Exception as exc:
+        print(f"[ORM Sync Warning] Failed to dual-write baseline session: {exc}")
+
     return session_id
 
 
@@ -145,7 +237,7 @@ def save_retest_delta(
     delta_data: Dict[str, Any],
     retest_wcpm: float
 ) -> int:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO retest_sessions (
@@ -164,8 +256,40 @@ def save_retest_delta(
         retest_wcpm
     ))
     retest_id = cursor.lastrowid
+
+    # Commit and close the raw connection BEFORE opening any SQLAlchemy session.
+    # SQLite only allows one writer at a time; leaving this connection open while
+    # SQLAlchemy also writes causes "database is locked".
     conn.commit()
     conn.close()
+
+    # Dual-write into SQLAlchemy ORM tables
+    try:
+        from app.db import SessionLocal
+        from app import models
+        from sqlalchemy import desc
+        with SessionLocal() as orm_db:
+            # Find the most recent session for this student
+            recent_session = (
+                orm_db.query(models.PracticeSession)
+                .filter(models.PracticeSession.student_id == student_id)
+                .order_by(desc(models.PracticeSession.started_at))
+                .first()
+            )
+            if recent_session:
+                recent_session.completed_retest = True
+                recent_session.delta_summary = delta_data
+                retest_attempt = models.ReadingAttempt(
+                    session_id=recent_session.id,
+                    passage_type="ADAPTIVE_GENERATED",
+                    wcpm=retest_wcpm,
+                    accuracy_percentage=delta_data.get("retest_accuracy", 0.0),
+                )
+                orm_db.add(retest_attempt)
+                orm_db.commit()
+    except Exception as exc:
+        print(f"[ORM Sync Warning] Failed to dual-write retest session: {exc}")
+
     return retest_id
 
 
@@ -191,10 +315,14 @@ def root():
 def health_check():
     return {
         "status": "healthy",
+        "version": "3.0.0",
         "groq_configured": bool(os.getenv("GROQ_API_KEY")),
         "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
         "resend_configured": bool(os.getenv("RESEND_API_KEY")),
-        "stt_provider": os.getenv("STT_PROVIDER", "auto")
+        "stt_provider": os.getenv("STT_PROVIDER", "auto"),
+        "database_url": os.getenv("DATABASE_URL", "sqlite (default)").split("@")[-1] if "@" in os.getenv("DATABASE_URL", "") else "sqlite (default)",
+        "teacher_ecosystem": "enabled",
+        "digest_scheduler": "running",
     }
 
 
@@ -259,7 +387,13 @@ async def analyze_reading(
         )
         transcribed_text = stt_result.get("text", "")
         transcribed_words = stt_result.get("words", [])
-    except STTConfigurationError as e:
+    except STTNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except STTProviderError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except STTTimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
+    except STTEmptyTranscriptionError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
     if not transcribed_text:
@@ -392,7 +526,13 @@ async def evaluate_retest(
         )
         transcribed_text = stt_result.get("text", "")
         transcribed_words = stt_result.get("words", [])
-    except STTConfigurationError as e:
+    except STTNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except STTProviderError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except STTTimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
+    except STTEmptyTranscriptionError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
     if not transcribed_text:

@@ -181,12 +181,43 @@ export const AudioControls: React.FC<AudioControlsProps> = ({
     onAnalysisStart();
 
     const duration = Math.max(elapsedSeconds, 1);
+    console.info('[Audio Lifecycle] Recording stopped →');
+
     try {
       // MediaRecorder is strictly the single source of truth for audio
-      const { audioBlob } = await recordingServiceRef.current.stopRecording();
+      const { audioBlob, mimeType } = await recordingServiceRef.current.stopRecording();
+      const blobSizeKb = (audioBlob.size / 1024).toFixed(1);
+      console.info(`[Audio Lifecycle] Blob created → size=${blobSizeKb} KB | mimeType=${mimeType} | duration=${duration}s`);
+
+      // ── Client-side pre-validation ──────────────────────────────────────
+      // A WebM container header alone is ~300-400 bytes; anything under 1 KB
+      // or under 0.5 s is guaranteed to contain no speech data.
+      const MIN_BLOB_BYTES = 1024; // 1 KB
+      const MIN_DURATION_S = 0.5;
+
+      if (!audioBlob || audioBlob.size < MIN_BLOB_BYTES) {
+        console.error(`[Audio Lifecycle] REJECTED: blob too small (${audioBlob?.size ?? 0} bytes < ${MIN_BLOB_BYTES} bytes).`);
+        setMicError(
+          `Recording too short or silent (${audioBlob?.size ?? 0} bytes captured). ` +
+          'Please speak clearly into the microphone and try again.'
+        );
+        onReset();
+        return;
+      }
+
+      if (duration < MIN_DURATION_S) {
+        console.error(`[Audio Lifecycle] REJECTED: duration too short (${duration}s < ${MIN_DURATION_S}s).`);
+        setMicError(
+          `Recording was too short (${duration}s). Please read for at least a few seconds.`
+        );
+        onReset();
+        return;
+      }
+
+      console.info(`[Audio Lifecycle] Upload started → sending ${blobSizeKb} KB to backend STT…`);
       onAnalysisComplete(audioBlob, '', duration);
     } catch (err: any) {
-      console.error('Failed to finalize audio capture:', err);
+      console.error('[Audio Lifecycle] Failed to finalize audio capture:', err);
       onReset();
     }
   };

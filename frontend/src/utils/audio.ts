@@ -86,7 +86,7 @@ export async function getAudioInputDevices(): Promise<AudioInputDevice[]> {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const audioInputs = devices.filter((d) => d.kind === 'audioinput');
 
-    const mapped = audioInputs.map((d, index) => ({
+    const mapped: AudioInputDevice[] = audioInputs.map((d, index) => ({
       deviceId: d.deviceId,
       label: d.label || `Microphone ${index + 1} (${d.deviceId ? d.deviceId.slice(0, 8) + '...' : 'System Device'})`,
       groupId: d.groupId,
@@ -98,13 +98,13 @@ export async function getAudioInputDevices(): Promise<AudioInputDevice[]> {
       mapped.unshift({
         deviceId: 'default',
         label: 'System Default Microphone (Auto)',
-      });
+      } as AudioInputDevice);
     }
 
     return mapped;
   } catch (err) {
     console.error('Failed to enumerate audio devices:', err);
-    return [{ deviceId: 'default', label: 'System Default Microphone (Auto)' }];
+    return [{ deviceId: 'default', label: 'System Default Microphone (Auto)' } as AudioInputDevice];
   }
 }
 
@@ -277,6 +277,7 @@ export class AudioRecordingService {
     };
 
     // Slice audio in 250ms chunks
+    console.info(`[Audio Lifecycle] Recording started → mimeType="${this.mediaRecorder.mimeType || 'browser-default'}" | sliceInterval=250ms`);
     this.mediaRecorder.start(250);
 
     return trackInfo;

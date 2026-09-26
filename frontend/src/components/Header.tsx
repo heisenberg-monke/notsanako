@@ -35,8 +35,14 @@ export const Header: React.FC<HeaderProps> = ({ selectedGrade = 4, language = 'e
           </div>
         </div>
 
-        {/* Grade and Mode Status */}
+        {/* Grade and Mode Status + Teacher Dashboard Link */}
         <div className="flex items-center gap-2">
+          <a
+            href="/teacher"
+            className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold transition-all border border-indigo-200 flex items-center gap-1.5 shadow-sm"
+          >
+            <span>👩‍🏫 Teacher Portal</span>
+          </a>
           <div className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold flex items-center gap-1.5">
             <span>Grade {selectedGrade}</span>
             <span className="text-slate-300">•</span>

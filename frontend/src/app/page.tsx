@@ -162,7 +162,6 @@ export default function Home() {
     setErrorMessage(null);
   };
 
-  // Step 1 Finish: Baseline Audio Completed
   const handleBaselineAudioComplete = async (
     audioBlob: Blob,
     clientTranscript: string,
@@ -170,6 +169,8 @@ export default function Home() {
   ) => {
     setIsAnalyzing(true);
     setErrorMessage(null);
+
+    console.info(`[Audio Lifecycle] STT started → uploading ${(audioBlob.size / 1024).toFixed(1)} KB baseline audio to /api/analyze-reading`);
 
     try {
       const formData = new FormData();
@@ -193,6 +194,8 @@ export default function Home() {
       }
 
       const analysisData: ReadingAnalysis = await res.json();
+      console.info(`[Audio Lifecycle] STT completed → Analysis received: accuracy=${analysisData.metrics?.accuracy_percentage?.toFixed(1)}% | WCPM=${analysisData.metrics?.wcpm?.toFixed(0)}`);
+
       setBaselineAnalysis(analysisData);
 
       if (analysisData.priority_target_words && analysisData.priority_target_words.length > 0) {
@@ -207,9 +210,10 @@ export default function Home() {
         setPriorityTargetWords(defaults);
       }
 
+      console.info('[Audio Lifecycle] Result displayed → opening baseline evaluation modal.');
       setIsBaselineModalOpen(true);
     } catch (err: any) {
-      console.error('Audio analysis failed:', err);
+      console.error('[Audio Lifecycle] Baseline analysis failed:', err);
       setErrorMessage(
         err.message || 'Audio analysis failed. Verify backend is running and STT API key is configured in backend/.env.'
       );
@@ -298,6 +302,8 @@ export default function Home() {
     setIsRetestAnalyzing(true);
     setErrorMessage(null);
 
+    console.info(`[Audio Lifecycle] STT started → uploading ${(audioBlob.size / 1024).toFixed(1)} KB retest audio to /api/evaluate-retest`);
+
     const targetWords = priorityTargetWords.map((tw) => tw.word);
 
     try {
@@ -327,12 +333,16 @@ export default function Home() {
       }
 
       const retestData: RetestEvaluationResult = await res.json();
+      console.info(`[Audio Lifecycle] STT completed → Retest delta: ${retestData.delta_summary?.delta?.toFixed(2)} | mastered=${retestData.delta_summary?.mastered_words_count}`);
+
       setDeltaSummary(retestData.delta_summary);
       setRetestMetrics(retestData.retest_metrics);
       setSessionStage('COMPLETED');
+
+      console.info('[Audio Lifecycle] Result displayed → opening delta improvement modal.');
       setIsDeltaModalOpen(true);
     } catch (err: any) {
-      console.error('Retest audio evaluation failed:', err);
+      console.error('[Audio Lifecycle] Retest evaluation failed:', err);
       setErrorMessage(
         err.message || 'Retest evaluation failed. Verify backend is running and STT API key is configured in backend/.env.'
       );

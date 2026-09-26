@@ -167,3 +167,12 @@ export interface RetestEvaluationResult {
   delta_summary: DeltaSummary;
   positive_reinforcement: string;
 }
+
+/** Preview returned by the adaptive passage generation step */
+export interface AdaptiveRemediationPreview {
+  target_words: string[];
+  grade_level: number;
+  remediation_story: string;
+  prompt_context: string;
+  source?: string;
+}
