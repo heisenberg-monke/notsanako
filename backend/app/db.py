@@ -59,15 +59,21 @@ def init_db():
     with SessionLocal() as db:
         teacher = db.query(models.Teacher).filter(models.Teacher.id == "default-teacher-1").first()
         if not teacher:
+            # Use TEACHER_EMAIL from .env so Resend delivers to a verified address
+            default_email = os.getenv("TEACHER_EMAIL", "teacher@readingcoach.edu.in")
             teacher = models.Teacher(
                 id="default-teacher-1",
-                email="teacher@readingcoach.edu.in",
+                email=default_email,
                 name="Sunita Sharma",
                 school_name="Kendriya Vidyalaya, Pune",
                 email_verified=True,
                 digest_time="16:00"
             )
             db.add(teacher)
+            db.commit()
+        elif os.getenv("TEACHER_EMAIL") and teacher.email != os.getenv("TEACHER_EMAIL"):
+            # Update email if env changed (allows fixing without deleting the DB)
+            teacher.email = os.getenv("TEACHER_EMAIL")
             db.commit()
 
         classroom = db.query(models.Classroom).filter(models.Classroom.id == "default-class-1").first()

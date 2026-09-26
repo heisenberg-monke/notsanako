@@ -628,14 +628,14 @@ export default function TeacherDashboard() {
     setTriggeringDigest(true);
     setDigestMsg('');
     try {
-      const res = await apiFetch<{ status: string; digest_date: string; email_sent: boolean }>(
+      const res = await apiFetch<{ status: string; digest_date: string; email_sent: boolean; error?: string }>(
         `/teacher/${teacher.id}/digest/trigger`,
         { method: 'POST' }
       );
       setDigestMsg(
         res.email_sent
           ? `✅ Digest for ${res.digest_date} sent to ${teacher.email}.`
-          : `📋 Digest for ${res.digest_date} generated. Email skipped (RESEND_API_KEY not set in backend/.env).`
+          : `📋 Digest for ${res.digest_date} generated (email not sent — check backend logs for details, e.g. unverified Resend domain or recipient restriction).`
       );
     } catch (e: any) {
       setDigestMsg(`❌ ${e.message}`);

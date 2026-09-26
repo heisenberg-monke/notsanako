@@ -6,12 +6,6 @@ not from within a FastAPI request handler.
 
 import os
 import httpx
-from typing import Optional
-
-
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-# Use onboarding@resend.dev as default so unverified custom domains don't fail in development/testing
-RESEND_FROM = os.getenv("RESEND_FROM", "onboarding@resend.dev")
 
 
 class EmailDeliveryError(Exception):
@@ -28,8 +22,14 @@ def send_digest_email(
     Send the daily digest HTML email via Resend.
     Returns True on success, False if RESEND_API_KEY is not configured.
     Raises EmailDeliveryError on API failure.
+
+    NOTE: RESEND_API_KEY and RESEND_FROM are read lazily here (not at import
+    time) so that load_dotenv() in main.py always runs first.
     """
-    if not RESEND_API_KEY:
+    api_key = os.getenv("RESEND_API_KEY", "")
+    from_addr = os.getenv("RESEND_FROM", "onboarding@resend.dev")
+
+    if not api_key:
         print(
             f"[Email] RESEND_API_KEY not configured — skipping email to {to_email}. "
             "Set RESEND_API_KEY in backend/.env to enable digest delivery."
@@ -39,19 +39,19 @@ def send_digest_email(
     subject = f"📚 Reading Coach Digest — {digest_date}"
 
     payload = {
-        "from": RESEND_FROM,
+        "from": from_addr,
         "to": [to_email],
         "subject": subject,
         "html": html_body,
     }
 
-    print(f"[Email] Sending digest to {to_email} via Resend...")
+    print(f"[Email] Sending digest to {to_email} via Resend (from: {from_addr})...")
 
     try:
         resp = httpx.post(
             "https://api.resend.com/emails",
             headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json=payload,

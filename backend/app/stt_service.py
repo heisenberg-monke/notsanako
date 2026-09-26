@@ -9,6 +9,7 @@ Modular Speech-to-Text (STT) Service with Authoritative Backend Transcription.
 
 import os
 import time
+import asyncio
 import httpx
 from typing import Dict, Any
 
@@ -76,6 +77,7 @@ class STTService:
     ) -> Dict[str, Any]:
         """
         Transcribes audio bytes using configured backend STT providers.
+        Retries up to 3 times with exponential backoff on 5xx / network errors.
 
         Returns:
             {
@@ -86,6 +88,37 @@ class STTService:
         Raises explicit exceptions on missing keys, provider failures,
         timeouts, or empty transcripts — never falls back silently.
         """
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                return await self._transcribe_once(
+                    audio_bytes, filename, language, estimated_duration
+                )
+            except STTProviderError as exc:
+                # Only retry on server-side 5xx; 4xx errors (bad key, bad format) are final
+                if exc.status_code < 500 or attempt == 2:
+                    raise
+                last_error = exc
+                wait = 2 ** attempt  # 1s, 2s
+                print(f"[STT Retry] Attempt {attempt + 1} failed (HTTP {exc.status_code}), retrying in {wait}s")
+                await asyncio.sleep(wait)
+            except STTTimeoutError as exc:
+                if attempt == 2:
+                    raise
+                last_error = exc
+                wait = 2 ** attempt
+                print(f"[STT Retry] Attempt {attempt + 1} timed out, retrying in {wait}s")
+                await asyncio.sleep(wait)
+        raise last_error  # type: ignore[misc]
+
+    async def _transcribe_once(
+        self,
+        audio_bytes: bytes,
+        filename: str = "audio.wav",
+        language: str = "en",
+        estimated_duration: float = 10.0,
+    ) -> Dict[str, Any]:
+        """Single-attempt transcription dispatch."""
         # Re-read env at call time so a hot-reloaded .env is picked up
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")

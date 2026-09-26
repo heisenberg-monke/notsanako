@@ -183,3 +183,53 @@ class DailyDigest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     teacher: Mapped["Teacher"] = relationship(back_populates="daily_digests")
+
+
+# ---------------------------------------------------------------------------
+# ConsentRecord  (DPDP Act 2023 — explicit parental/guardian consent)
+# ---------------------------------------------------------------------------
+class ConsentRecord(Base):
+    """Stores explicit consent granted before a student's first session."""
+    __tablename__ = "consent_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    student_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    given_by: Mapped[str] = mapped_column(String(255), nullable=False)       # guardian name
+    given_by_relation: Mapped[str] = mapped_column(String(64), default="parent")
+    purpose: Mapped[str] = mapped_column(
+        String(512),
+        default="Reading assessment and personalised practice only. No audio retained."
+    )
+    consent_version: Mapped[str] = mapped_column(String(16), default="1.0")
+    ip_address: Mapped[str] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    revoked_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None
+
+
+# ---------------------------------------------------------------------------
+# TelemetryEvent  (anonymised pilot metrics — no PII stored)
+# ---------------------------------------------------------------------------
+class TelemetryEvent(Base):
+    """
+    Anonymised telemetry for pilot evaluation.
+    student_id is one-way hashed before storage — never stored raw.
+    """
+    __tablename__ = "telemetry_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    student_hash: Mapped[str] = mapped_column(String(64), nullable=True)   # SHA-256 truncated
+    classroom_id: Mapped[str] = mapped_column(String(64), nullable=True)
+    wcpm: Mapped[float] = mapped_column(Float, nullable=True)
+    accuracy_pct: Mapped[float] = mapped_column(Float, nullable=True)
+    delta_accuracy: Mapped[float] = mapped_column(Float, nullable=True)
+    error_type_counts: Mapped[dict] = mapped_column(JSON, nullable=True)
+    session_duration_s: Mapped[float] = mapped_column(Float, nullable=True)
+    stt_provider: Mapped[str] = mapped_column(String(32), nullable=True)
+    language: Mapped[str] = mapped_column(String(8), nullable=True)
+    grade_level: Mapped[int] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

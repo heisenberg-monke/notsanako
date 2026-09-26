@@ -6,19 +6,24 @@ Baseline -> Diagnose -> Micro-Feedback -> Generate Personalized Story (Gemini 1.
 Teacher Ecosystem:
 PostgreSQL/SQLite-backed roster management, class dashboard analytics,
 automated 4 PM IST daily digest, and Resend email delivery.
+
+Privacy: Audio processed in ephemeral memory only — zero retention policy.
 """
 
 import os
 import sqlite3
 import json
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from typing import Optional, List, Dict, Any, Tuple
+from fastapi import FastAPI, HTTPException, Response, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
+
+from app.logging_config import configure_logging, logger
+configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 
 from app.passages import get_all_passages, get_passage_by_id
 from app.alignment import evaluate_reading_attempt_indic
@@ -39,6 +44,7 @@ from app.remediation import (
 from app.db import init_db
 from app.scheduler import start_scheduler, stop_scheduler
 from app.routers.teacher import router as teacher_router
+from app.routers.consent import router as consent_router
 
 
 @asynccontextmanager
@@ -53,12 +59,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Adaptive Reading Coach API",
     description="Closed-Loop Indic Oral Reading Fluency & Adaptive Remediation Cycle + Teacher Ecosystem",
-    version="3.0.0",
+    version="3.1.0",
     lifespan=lifespan,
 )
 
-# Teacher ecosystem routes
+# Routers
 app.include_router(teacher_router)
+app.include_router(consent_router)
 
 
 # Enable CORS for Next.js frontend
@@ -70,7 +77,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "reading_coach.db")
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "reading_coach.db"))
+
+
+def _check_audio_quality(audio_bytes: bytes, min_size_bytes: int = 2000) -> Tuple[bool, str]:
+    """
+    Basic audio quality heuristic using size and byte-variance.
+    Returns (ok, reason). Rejects silence or suspiciously tiny blobs
+    before we spend a network round-trip on STT.
+    """
+    if len(audio_bytes) < min_size_bytes:
+        return False, (
+            f"Audio too small ({len(audio_bytes)} bytes) — "
+            "likely silence or microphone not active."
+        )
+    # Sample the PCM payload area (skip common WebM/WAV header bytes)
+    sample = audio_bytes[44: min(len(audio_bytes), 4044)]
+    if len(sample) > 100:
+        variance = sum((b - 128) ** 2 for b in sample) / len(sample)
+        if variance < 5.0:
+            return False, (
+                "Audio appears to be silence or very low volume — "
+                "please speak clearly into the microphone."
+            )
+    return True, "ok"
 
 
 def init_db():
@@ -313,16 +343,37 @@ def root():
 
 @app.get("/api/health")
 def health_check():
+    import time
+    from sqlalchemy import text
+    from app.db import SessionLocal
+
+    db_ok = False
+    db_latency_ms = None
+    db_error = None
+    try:
+        t0 = time.perf_counter()
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+        db_latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        db_ok = True
+    except Exception as exc:
+        db_error = str(exc)
+
     return {
-        "status": "healthy",
-        "version": "3.0.0",
+        "status": "healthy" if db_ok else "degraded",
+        "version": "3.1.0",
         "groq_configured": bool(os.getenv("GROQ_API_KEY")),
         "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
         "resend_configured": bool(os.getenv("RESEND_API_KEY")),
         "stt_provider": os.getenv("STT_PROVIDER", "auto"),
-        "database_url": os.getenv("DATABASE_URL", "sqlite (default)").split("@")[-1] if "@" in os.getenv("DATABASE_URL", "") else "sqlite (default)",
+        "database_ok": db_ok,
+        "database_latency_ms": db_latency_ms,
+        "database_error": db_error,
         "teacher_ecosystem": "enabled",
         "digest_scheduler": "running",
+        "audio_retention_policy": "zero — ephemeral memory only",
+        "dpdp_consent_api": "enabled",
+        "telemetry": "anonymised",
     }
 
 
@@ -377,6 +428,12 @@ async def analyze_reading(
             detail="EMPTY_AUDIO_FILE: Uploaded audio file contains zero or insufficient bytes."
         )
 
+    # Audio quality pre-check (silence/noise detection)
+    audio_ok, audio_msg = _check_audio_quality(audio_bytes)
+    if not audio_ok:
+        audio_bytes = b""  # discard immediately
+        raise HTTPException(status_code=422, detail=f"POOR_AUDIO_QUALITY: {audio_msg}")
+
     filename = audio.filename or "recording.wav"
     try:
         stt_result = await stt_service.transcribe_audio_with_timestamps(
@@ -395,6 +452,9 @@ async def analyze_reading(
         raise HTTPException(status_code=504, detail=str(e))
     except STTEmptyTranscriptionError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    finally:
+        # PRIVACY: Discard raw audio bytes immediately after STT — zero-retention policy
+        audio_bytes = b""
 
     if not transcribed_text:
         raise HTTPException(
@@ -422,7 +482,12 @@ async def analyze_reading(
         max_targets=5
     )
 
-    return {
+    logger.info("analyze_reading complete", extra={
+        "student_id": student_id, "passage_id": passage_id,
+        "wcpm": evaluation["metrics"].get("wcpm"), "session_id": session_id,
+    })
+
+    result = {
         "session_id": session_id,
         "passage_id": passage_id,
         "passage_title": passage["title"],
@@ -438,6 +503,13 @@ async def analyze_reading(
         "long_pauses": evaluation["long_pauses"],
         "feedback": evaluation["feedback"]
     }
+    # Signal to client that audio was NOT retained server-side
+    response = Response(
+        content=json.dumps(result, ensure_ascii=False),
+        media_type="application/json",
+        headers={"X-Audio-Retained": "false"},
+    )
+    return response
 
 
 @app.post("/api/rank-and-generate-remediation")
@@ -516,6 +588,12 @@ async def evaluate_retest(
             detail="EMPTY_AUDIO_FILE: Uploaded retest audio file contains zero or insufficient bytes."
         )
 
+    # Audio quality pre-check
+    audio_ok, audio_msg = _check_audio_quality(audio_bytes)
+    if not audio_ok:
+        audio_bytes = b""
+        raise HTTPException(status_code=422, detail=f"POOR_AUDIO_QUALITY: {audio_msg}")
+
     filename = audio.filename or "retest_recording.wav"
     try:
         stt_result = await stt_service.transcribe_audio_with_timestamps(
@@ -534,6 +612,9 @@ async def evaluate_retest(
         raise HTTPException(status_code=504, detail=str(e))
     except STTEmptyTranscriptionError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    finally:
+        # PRIVACY: Discard raw audio bytes immediately — zero-retention policy
+        audio_bytes = b""
 
     if not transcribed_text:
         raise HTTPException(
@@ -565,7 +646,13 @@ async def evaluate_retest(
         retest_wcpm=retest_evaluation["metrics"].get("wcpm", 0.0)
     )
 
-    return {
+    logger.info("evaluate_retest complete", extra={
+        "student_id": student_id, "retest_id": retest_id,
+        "delta": delta_summary.get("delta"),
+        "mastered": delta_summary.get("mastered_words_count"),
+    })
+
+    result = {
         "retest_id": retest_id,
         "transcribed_text": transcribed_text,
         "retest_alignments": retest_evaluation["alignments"],
@@ -573,6 +660,11 @@ async def evaluate_retest(
         "delta_summary": delta_summary,
         "positive_reinforcement": delta_summary["positive_reinforcement"]
     }
+    return Response(
+        content=json.dumps(result, ensure_ascii=False),
+        media_type="application/json",
+        headers={"X-Audio-Retained": "false"},
+    )
 
 
 if __name__ == "__main__":
