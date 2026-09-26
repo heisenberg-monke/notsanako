@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 from app.passages import get_all_passages, get_passage_by_id
 from app.alignment import evaluate_reading_attempt_indic
-from app.stt_service import stt_service
+from app.stt_service import stt_service, STTConfigurationError
 from app.remediation import (
     rank_and_select_target_words,
     generate_remediation_story_gemini,
@@ -236,29 +236,36 @@ async def analyze_reading(
     transcribed_text = ""
     transcribed_words: List[Dict[str, Any]] = []
 
-    if audio is not None:
-        audio_bytes = await audio.read()
-        filename = audio.filename or "recording.wav"
+    if audio is None:
+        raise HTTPException(
+            status_code=400,
+            detail="NO_AUDIO_RECEIVED: No audio file was uploaded from the client."
+        )
+
+    audio_bytes = await audio.read()
+    if len(audio_bytes) < 100:
+        raise HTTPException(
+            status_code=400,
+            detail="EMPTY_AUDIO_FILE: Uploaded audio file contains zero or insufficient bytes."
+        )
+
+    filename = audio.filename or "recording.wav"
+    try:
         stt_result = await stt_service.transcribe_audio_with_timestamps(
             audio_bytes=audio_bytes,
             filename=filename,
             language=language,
-            estimated_duration=duration_seconds,
-            reference_text=reference_text
+            estimated_duration=duration_seconds
         )
         transcribed_text = stt_result.get("text", "")
         transcribed_words = stt_result.get("words", [])
+    except STTConfigurationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
-    if not transcribed_text and client_transcript:
-        transcribed_text = client_transcript.strip()
-        transcribed_words = stt_service.synthesize_fallback_timestamps(
-            transcribed_text,
-            duration_seconds
-        )
-    elif transcribed_text and not transcribed_words:
-        transcribed_words = stt_service.synthesize_fallback_timestamps(
-            transcribed_text,
-            duration_seconds
+    if not transcribed_text:
+        raise HTTPException(
+            status_code=422,
+            detail="NO_TRANSCRIPTION_PRODUCED: Speech recognition finished without transcribing any words. Please verify that your microphone volume is active and speak clearly."
         )
 
     evaluation = evaluate_reading_attempt_indic(
@@ -362,29 +369,36 @@ async def evaluate_retest(
     transcribed_text = ""
     transcribed_words: List[Dict[str, Any]] = []
 
-    if audio is not None:
-        audio_bytes = await audio.read()
-        filename = audio.filename or "retest_recording.wav"
+    if audio is None:
+        raise HTTPException(
+            status_code=400,
+            detail="NO_AUDIO_RECEIVED: No audio file was uploaded for the retest attempt."
+        )
+
+    audio_bytes = await audio.read()
+    if len(audio_bytes) < 100:
+        raise HTTPException(
+            status_code=400,
+            detail="EMPTY_AUDIO_FILE: Uploaded retest audio file contains zero or insufficient bytes."
+        )
+
+    filename = audio.filename or "retest_recording.wav"
+    try:
         stt_result = await stt_service.transcribe_audio_with_timestamps(
             audio_bytes=audio_bytes,
             filename=filename,
             language=language or "hi",
-            estimated_duration=duration_seconds,
-            reference_text=remediation_passage_text
+            estimated_duration=duration_seconds
         )
         transcribed_text = stt_result.get("text", "")
         transcribed_words = stt_result.get("words", [])
+    except STTConfigurationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
-    if not transcribed_text and client_transcript:
-        transcribed_text = client_transcript.strip()
-        transcribed_words = stt_service.synthesize_fallback_timestamps(
-            transcribed_text,
-            duration_seconds
-        )
-    elif transcribed_text and not transcribed_words:
-        transcribed_words = stt_service.synthesize_fallback_timestamps(
-            transcribed_text,
-            duration_seconds
+    if not transcribed_text:
+        raise HTTPException(
+            status_code=422,
+            detail="NO_TRANSCRIPTION_PRODUCED: Retest speech recognition returned no transcribed words."
         )
 
     # 1. Align retest reading against remediation passage text

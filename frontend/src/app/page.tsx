@@ -188,7 +188,8 @@ export default function Home() {
       });
 
       if (!res.ok) {
-        throw new Error(`Server returned error code: ${res.status}`);
+        const errJson = await res.json().catch(() => null);
+        throw new Error(errJson?.detail || `Server returned error code: ${res.status}`);
       }
 
       const analysisData: ReadingAnalysis = await res.json();
@@ -197,7 +198,6 @@ export default function Home() {
       if (analysisData.priority_target_words && analysisData.priority_target_words.length > 0) {
         setPriorityTargetWords(analysisData.priority_target_words);
       } else {
-        // Fallback target words from structured errors or key vocabulary
         const defaults = selectedPassage.key_vocabulary.slice(0, 4).map((w) => ({
           word: w,
           error_type: 'PRACTICE',
@@ -209,105 +209,10 @@ export default function Home() {
 
       setIsBaselineModalOpen(true);
     } catch (err: any) {
-      console.warn('API call failed, generating in-browser fallback alignment:', err);
-
-      const transcript = clientTranscript || selectedPassage.text;
-      const words = selectedPassage.text.split(/\s+/);
-      const hypWords = transcript.split(/\s+/);
-
-      const alignments: WordAlignment[] = words.map((w, idx) => {
-        const spoken = hypWords[idx] || null;
-        const isMatched = spoken && spoken.toLowerCase().replace(/[^\w\u0900-\u097F]/g, '') === w.toLowerCase().replace(/[^\w\u0900-\u097F]/g, '');
-        return {
-          index: idx,
-          expected_word: w,
-          spoken_word: spoken,
-          status: isMatched ? 'correct' : (spoken ? 'substitution' : 'omission'),
-          error_type: isMatched ? 'CORRECT' : (selectedPassage.language === 'hi' ? 'CONJUNCT' : 'SUBSTITUTION'),
-          similarity: isMatched ? 1.0 : 0.4,
-          pause_before: 0,
-          in_stumble_cluster: false,
-        };
-      });
-
-      const correctCount = alignments.filter((a) => a.status === 'correct').length;
-      const accuracy = Math.round((correctCount / Math.max(words.length, 1)) * 100);
-      const wcpm = Math.round((correctCount / Math.max(durationSeconds, 1)) * 60);
-
-      const fallbackTargets: PriorityTargetWord[] = alignments
-        .filter((a) => a.status !== 'correct' && a.expected_word && a.expected_word.length > 2)
-        .slice(0, 4)
-        .map((a) => ({
-          word: a.expected_word as string,
-          error_type: a.error_type || 'PRACTICE',
-          frequency: 1,
-          total_score: 3.5,
-        }));
-
-      if (fallbackTargets.length === 0) {
-        fallbackTargets.push(
-          ...selectedPassage.key_vocabulary.slice(0, 3).map((w) => ({
-            word: w,
-            error_type: 'PRACTICE',
-            frequency: 1,
-            total_score: 2.0,
-          }))
-        );
-      }
-
-      setPriorityTargetWords(fallbackTargets);
-
-      const fallbackAnalysis: ReadingAnalysis = {
-        passage_id: selectedPassage.id,
-        passage_title: selectedPassage.title,
-        language: selectedPassage.language,
-        reference_text: selectedPassage.text,
-        transcribed_text: transcript,
-        alignments: alignments,
-        metrics: {
-          accuracy_percentage: accuracy,
-          wcpm: wcpm,
-          wpm: Math.round((hypWords.length / Math.max(durationSeconds, 1)) * 60),
-          target_wcpm: selectedPassage.target_wcpm,
-          duration_seconds: durationSeconds,
-          total_expected_words: words.length,
-          total_spoken_words: hypWords.length,
-          correct_count: correctCount,
-          error_count: alignments.filter((a) => a.status !== 'correct').length,
-          rating: accuracy >= 80 ? 'Fluent Reader' : 'Developing Reader',
-        },
-        error_breakdown: {
-          matra_errors: selectedPassage.language === 'hi' ? 1 : 0,
-          conjunct_errors: selectedPassage.language === 'hi' ? 1 : 0,
-          phonetic_errors: 0,
-          omission_errors: alignments.filter((a) => a.status === 'omission').length,
-          repetition_errors: 0,
-          general_substitution_errors: alignments.filter((a) => a.status === 'substitution').length,
-          insertion_errors: 0,
-          dialect_variants_accepted: 0,
-          long_pauses_count: 0,
-          stumble_clusters_count: 0,
-        },
-        structured_errors: alignments
-          .filter((a) => a.status !== 'correct' && a.expected_word)
-          .map((a) => ({
-            word: a.expected_word as string,
-            spoken_word: a.spoken_word,
-            error_type: a.error_type || 'SUBSTITUTION',
-            target_pattern: a.expected_word as string,
-            linguistic_detail: `Target word practice for "${a.expected_word}".`,
-            pedagogical_remedy: 'Practice clear blending of sounds.',
-            pause_before: 0,
-            in_stumble_cluster: false,
-          })),
-        priority_target_words: fallbackTargets,
-        stumble_clusters: [],
-        long_pauses: [],
-        feedback: 'Good reading effort! We identified key words to practice together.',
-      };
-
-      setBaselineAnalysis(fallbackAnalysis);
-      setIsBaselineModalOpen(true);
+      console.error('Audio analysis failed:', err);
+      setErrorMessage(
+        err.message || 'Audio analysis failed. Verify backend is running and STT API key is configured in backend/.env.'
+      );
     } finally {
       setIsAnalyzing(false);
     }
@@ -417,7 +322,8 @@ export default function Home() {
       });
 
       if (!res.ok) {
-        throw new Error(`Server returned error code: ${res.status}`);
+        const errJson = await res.json().catch(() => null);
+        throw new Error(errJson?.detail || `Server returned error code: ${res.status}`);
       }
 
       const retestData: RetestEvaluationResult = await res.json();
@@ -426,41 +332,10 @@ export default function Home() {
       setSessionStage('COMPLETED');
       setIsDeltaModalOpen(true);
     } catch (err: any) {
-      console.warn('API call failed, calculating local retest delta:', err);
-
-      // Fallback local delta calculation
-      const mastered = targetWords.slice(0, Math.max(1, targetWords.length - 1));
-      const fallbackDelta: DeltaSummary = {
-        target_words: targetWords,
-        baseline_accuracy: 25.0,
-        retest_accuracy: 85.0,
-        delta: 60.0,
-        mastered_words_count: mastered.length,
-        total_target_words: targetWords.length,
-        word_mastery_breakdown: targetWords.map((w, idx) => ({
-          word: w,
-          baseline_correct: false,
-          retest_correct: idx < mastered.length,
-          mastered: idx < mastered.length,
-        })),
-        positive_reinforcement: `Spectacular progress! You mastered ${mastered.length} out of ${targetWords.length} tricky practice words, boosting your target word accuracy by +60.0%!`,
-      };
-
-      setDeltaSummary(fallbackDelta);
-      setRetestMetrics({
-        accuracy_percentage: 88,
-        wcpm: 76,
-        wpm: 82,
-        target_wcpm: selectedPassage.target_wcpm,
-        duration_seconds: durationSeconds,
-        total_expected_words: remediationPassage.word_count,
-        total_spoken_words: remediationPassage.word_count,
-        correct_count: Math.round(remediationPassage.word_count * 0.88),
-        error_count: 2,
-        rating: 'Fluent Confident Reader',
-      });
-      setSessionStage('COMPLETED');
-      setIsDeltaModalOpen(true);
+      console.error('Retest audio evaluation failed:', err);
+      setErrorMessage(
+        err.message || 'Retest evaluation failed. Verify backend is running and STT API key is configured in backend/.env.'
+      );
     } finally {
       setIsRetestAnalyzing(false);
     }

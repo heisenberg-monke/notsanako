@@ -4,118 +4,102 @@ An AI-powered oral reading coach and fluency assessment system for upper-primary
 
 ---
 
-## 🌟 What Has Been Built (Stage 1: Baseline Reading Loop)
+## 🎙️ Speech-to-Text (STT) Architecture & Clarification
 
-This MVP implements the first half of the adaptive oral reading loop:
-
-1. **Grade-Appropriate Passage Selection**: Curated Indian cultural and educational stories across Grades 3, 4, and 5 in both **English** (e.g. Dr. APJ Abdul Kalam, Panchatantra) and **Hindi** (e.g. Devanagari tales).
-2. **Kid-Friendly Reading Viewer**: Clear, large typography with word-level click-to-pronounce Text-To-Speech (TTS) to aid young learners.
-3. **16kHz Mono Microphone Audio Capture**: Built-in browser audio pipeline utilizing `navigator.mediaDevices.getUserMedia` with strict 16kHz mono audio constraints for speech-to-text engines.
-4. **Live Speech-to-Text Feedback**: Integrated browser Web Speech recognition ticker to provide real-time encouragement while the child reads aloud.
-5. **Word-Level Sequence Alignment Engine**: Custom dynamic programming sequence alignment (`Needleman-Wunsch` variant) supporting English and Indic Devanagari scripts with NFC normalization.
-6. **Detailed Error Classification**:
-   - **Correct**: Accurately read words (green highlights).
-   - **Substitution**: Mispronounced or replaced words (rose highlights with tooltips showing what was heard vs expected).
-   - **Omission**: Skipped words (amber dashed highlights).
-   - **Insertion / Repetition**: Extraneous words uttered (violet inline badges).
-7. **Oral Reading Fluency Metrics**:
-   - **Accuracy (%)**: `(Correct Words / Total Words) * 100`
-   - **WCPM (Words Correct Per Minute)**: Industry-standard foundational literacy metric.
-   - **Gross WPM & Elapsed Duration**.
-8. **Stop / Finish Action & Evaluation Modal**:
-   - Celebratory confetti on solid reading attempts.
-   - Breakdown of correct vs misread words.
-   - Interactive struggled word chips that speak the proper pronunciation upon tap.
-   - **Bridge to Stage 2**: Direct action to preview personalized remediation story generation.
+> **Important Architecture Notice**:
+> This system uses **authoritative backend Speech-to-Text (STT)** rather than browser `SpeechRecognition`.
+> - **The single source of truth for student reading is the raw audio recorded by `MediaRecorder`.**
+> - The recorded audio is streamed/uploaded directly to the FastAPI backend, where **Whisper (via Groq LPU or OpenAI)** transcribes it with sub-second word-level timestamp boundaries.
+> - **Groq or OpenAI STT credentials MUST be configured in `backend/.env` before expecting transcription.** (The system will deliberately return an explicit `STT_NOT_CONFIGURED` configuration error instead of silently generating fake/simulated readings).
 
 ---
 
-## 📁 Project Structure
+## 🛠️ Recommended 5-Step Debugging Order
 
-```text
-/home/noel/Documents/notsanako/
-├── backend/
-│   ├── app/
-│   │   ├── __init__.py
-│   │   ├── main.py            # FastAPI endpoints (/api/passages, /api/analyze-reading, etc.)
-│   │   ├── passages.py        # Curated English & Hindi reading passages
-│   │   ├── alignment.py       # Sequence alignment & oral reading metrics engine
-│   │   └── stt_service.py     # Modular Speech-to-Text provider (Groq, OpenAI, Web Speech)
-│   ├── requirements.txt
-│   ├── .env.example
-│   └── run.sh                 # One-click backend startup script
-│
-├── frontend/
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── layout.tsx     # PWA layout & Google Fonts
-│   │   │   ├── page.tsx       # Interactive student reading session
-│   │   │   └── globals.css    # Tailwind CSS & animations
-│   │   ├── components/
-│   │   │   ├── Header.tsx
-│   │   │   ├── PassageSelector.tsx
-│   │   │   ├── ReadingViewer.tsx
-│   │   │   ├── AudioControls.tsx
-│   │   │   └── EvaluationModal.tsx
-│   │   ├── utils/
-│   │   │   └── audio.ts       # 16kHz mono audio recorder & Web Speech service
-│   │   └── types/
-│   │       └── index.ts       # TypeScript interfaces
-│   ├── public/
-│   │   └── manifest.json      # PWA Web Manifest
-│   ├── package.json
-│   ├── next.config.mjs
-│   ├── tailwind.config.ts
-│   └── run.sh                 # One-click frontend startup script
-└── README.md
-```
+If you experience audio, microphone, or transcription issues, follow this exact sequence:
+
+1. **Verify Context (Origin Security)**:
+   - Ensure you are accessing the app via `http://localhost:3000` or an HTTPS origin.
+   - **Insecure origins (e.g. `http://192.168.x.x:3000`) are permanently blocked by browsers** from invoking `navigator.mediaDevices.getUserMedia()`.
+2. **Check Browser Microphone Permission & Device Selection**:
+   - Click the lock/tune icon next to the address bar in your browser and confirm **Microphone: Allow**.
+   - In the **Input Device** dropdown, confirm your desired physical microphone is selected (defaults to "System Default Microphone").
+3. **Watch the Real-Time RMS / dBFS Signal Meter While Speaking**:
+   - Click **Start Reading Aloud** and speak.
+   - The meter must show active signal: `🟢 Audio Signal Active` with `RMS > 0.005` (typically `-35 dBFS` to `-15 dBFS`).
+   - If it displays `⚠️ No Audio Detected (RMS: 0.000 • -∞ dBFS)`, check your physical mic switch or Linux sound mixer (e.g. `pavucontrol` under *Input Devices*).
+4. **Check the Logged Hardware `MediaTrackSettings`**:
+   - The UI displays the active sample rate and channel count (e.g. `SR: 48000 Hz • CH: 1 • ACTIVE`).
+   - Verify the state is `ACTIVE` and **not** `MUTED`. If the OS or hardware has muted the stream, the UI surfaces a prominent `HARDWARE/OS MUTE DETECTED` alert.
+5. **Verify the Backend STT API Key**:
+   - Only after confirming that microphone audio is captured (RMS meter active), ensure your `GROQ_API_KEY` is configured in `backend/.env`.
 
 ---
 
-## 🚀 How to Run
+## 🚀 Quick Setup & Configuration
 
-### Step 1: Start the Backend (FastAPI)
+### 1. Configure Backend Environment (`backend/.env`)
 
-In a terminal window:
-```bash
-cd /home/noel/Documents/notsanako/backend
-chmod +x run.sh
-./run.sh
-```
-*The backend API will be live at `http://localhost:8000` (interactive Swagger docs at `http://localhost:8000/docs`).*
-
-### Step 2: Start the Frontend (Next.js PWA)
-
-In a second terminal window:
-```bash
-cd /home/noel/Documents/notsanako/frontend
-chmod +x run.sh
-./run.sh
-```
-*The web app will open at `http://localhost:3000`.*
-
----
-
-## ⚙️ Configuration (Optional Cloud Speech-to-Text)
-
-The app works seamlessly out-of-the-box using the browser's native Web Speech API and in-browser audio processing.
-
-If you wish to use ultra-fast cloud Whisper transcription (e.g. for noisy Indian classroom environments), copy `.env.example` in the backend:
+Copy `.env.example`:
 ```bash
 cd /home/noel/Documents/notsanako/backend
 cp .env.example .env
 ```
-And add your free [Groq Cloud API key](https://console.groq.com):
+
+Add your API keys:
 ```env
-GROQ_API_KEY=gsk_your_groq_key_here
+# 1. Speech-to-Text: Get a fast, free Groq API key at https://console.groq.com
+GROQ_API_KEY=gsk_your_groq_api_key_here
+
+# 2. Remediation Story Synthesis: Get a Gemini key at https://aistudio.google.com
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# 3. Optional: Resend API key for teacher email summaries at https://resend.com
+RESEND_API_KEY=re_your_resend_key_here
+```
+
+### 2. Start the Backend (FastAPI)
+
+```bash
+cd /home/noel/Documents/notsanako/backend
+chmod +x run.sh
+./run.sh
+```
+*API will run at `http://localhost:8000` (interactive Swagger docs at `http://localhost:8000/docs`).*
+
+### 3. Start the Frontend (Next.js PWA)
+
+```bash
+cd /home/noel/Documents/notsanako/frontend
+npm run dev
+```
+*Open `http://localhost:3000` in Chrome, Edge, or Firefox.*
+
+---
+
+## 🌟 The Closed-Loop Student Remediation Cycle
+
+```text
+Baseline Reading (16kHz Audio)
+       │
+       ▼
+Indic Linguistic Diagnosis (Matra, Conjunct, Phonetic, WCPM, Pauses >1.5s, 3+ Stumble Clusters)
+       │
+       ▼
+Pedagogical Error Ranking (Top 3-5 Priority Target Words)
+       │
+       ▼
+Personalized Remediation Story Generation (Gemini 1.5: 60-80 words, Target Words Embedded 1-2x)
+       │
+       ▼
+Retest Reading (MediaRecorder Audio Captured)
+       │
+       ▼
+Mastery Delta Report (Δ = Post-test Target Word Accuracy − Baseline Target Word Accuracy)
 ```
 
 ---
 
-## 🔮 Next Steps (Second Half of the Adaptive Loop)
+## 📁 Repository Cleanliness & Maintenance
 
-Now that the baseline evaluation engine is operational:
-1. **Linguistic Diagnosis**: Classify Devanagari errors into Matra errors vs. Conjunct (*sanyuktakshar*) errors vs. Dialect shifts.
-2. **Remediation Story Generator**: Connect Gemini 1.5 to dynamically write 60-80 word stories focused on the child's identified struggled words.
-3. **Retest & Delta Calculation**: Allow the child to read the custom remediation passage and calculate the before/after improvement delta.
-4. **End-of-Day Teacher Digest**: Configure daily 4:00 PM email summaries showing students who need help.
+- Tracked cache files (`__pycache__/*.pyc`) and SQLite database files (`*.db`) are strictly excluded from version control via `.gitignore`.
