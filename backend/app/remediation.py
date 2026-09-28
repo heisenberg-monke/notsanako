@@ -136,16 +136,12 @@ async def generate_remediation_story_gemini(
     target_words_list = [normalize_devanagari(w) for w in target_words]
     words_formatted = ", ".join(f'"{w}"' for w in target_words_list)
 
-    fallback_reason = "GEMINI_API_KEY is not configured"
-    if gemini_key:
-        try:
-            lang_instruction = (
-                "Write in clear, standard Hindi (Devanagari script)." 
-                if language == "hi" 
-                else "Write in encouraging, fluent Indian English."
-            )
-
-            prompt = f"""
+    lang_instruction = (
+        "Write in clear, standard Hindi (Devanagari script)."
+        if language == "hi"
+        else "Write in encouraging, fluent Indian English."
+    )
+    prompt = f"""
 You are an expert pedagogical reading coach for upper-primary Indian school children (Grade {grade_level}).
 Task: Write a 60 to 80 word engaging children's mini-story centered around the theme: {theme_label}.
 Main character name: {student_name}
@@ -171,6 +167,9 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
   ]
 }}
 """
+    fallback_reason = "GEMINI_API_KEY is not configured"
+    if gemini_key:
+        try:
             payload = {
                 "contents": [
                     {
@@ -283,8 +282,160 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
             fallback_reason = f"{type(e).__name__}: {e}"
             print(f"[Gemini Error] Unexpected failure: {fallback_reason}")
 
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if openai_key:
+        openai_model = os.getenv("OPENAI_REMEDIATION_MODEL", "gpt-6-astra")
+        openai_payload = {
+            "model": openai_model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": "You are an expert children's reading coach. Follow the user's story requirements and return JSON only.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "text": {"format": {"type": "json_object"}},
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={"Authorization": f"Bearer {openai_key}"},
+                    json=openai_payload,
+                )
+
+            if response.status_code != 200:
+                fallback_reason = f"OpenAI returned HTTP {response.status_code}"
+                print(
+                    f"[OpenAI Error] HTTP {response.status_code}: "
+                    f"{response.text[:2000]}"
+                )
+            else:
+                response_json = response.json()
+                raw_content = None
+                for item in response_json.get("output", []):
+                    if item.get("type") != "message":
+                        continue
+                    for content in item.get("content", []):
+                        if content.get("type") == "output_text":
+                            raw_content = content.get("text")
+                            break
+                    if raw_content:
+                        break
+                if not raw_content:
+                    raise ValueError("response did not contain output text")
+                parsed = json.loads(raw_content)
+                story_text = parsed.get("text", "")
+                words_in_story = story_text.split()
+
+                if 40 <= len(words_in_story) <= 100:
+                    parsed["word_count"] = len(words_in_story)
+                    parsed["theme"] = theme
+                    parsed["grade_level"] = grade_level
+                    parsed["language"] = language
+                    parsed["generator_source"] = f"OpenAI {openai_model}"
+                    print(
+                        f"[OpenAI] Story generated with {openai_model} "
+                        f"({len(words_in_story)} words)."
+                    )
+                    return parsed
+
+                fallback_reason = (
+                    f"OpenAI returned an invalid word count: "
+                    f"{len(words_in_story)}"
+                )
+                print(f"[OpenAI Error] {fallback_reason}")
+
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
+            fallback_reason = f"OpenAI response was malformed: {e}"
+            print(f"[OpenAI Error] {fallback_reason}")
+        except httpx.TimeoutException as e:
+            fallback_reason = f"OpenAI request timed out: {e}"
+            print(f"[OpenAI Error] {fallback_reason}")
+        except httpx.RequestError as e:
+            fallback_reason = f"OpenAI network request failed: {e}"
+            print(f"[OpenAI Error] {fallback_reason}")
+        except Exception as e:
+            fallback_reason = f"OpenAI {type(e).__name__}: {e}"
+            print(f"[OpenAI Error] {fallback_reason}")
+    else:
+        fallback_reason = f"{fallback_reason}; OPENAI_API_KEY is not configured"
+
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key:
+        groq_model = os.getenv(
+            "GROQ_REMEDIATION_MODEL",
+            "openai/gpt-oss-20b",
+        )
+        groq_payload = {
+            "model": groq_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an expert children's reading coach. Follow the user's story requirements and return JSON only.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {groq_key}"},
+                    json=groq_payload,
+                )
+
+            if response.status_code != 200:
+                fallback_reason = f"Groq returned HTTP {response.status_code}"
+                print(
+                    f"[Groq Error] HTTP {response.status_code}: "
+                    f"{response.text[:2000]}"
+                )
+            else:
+                response_json = response.json()
+                raw_content = response_json["choices"][0]["message"]["content"]
+                parsed = json.loads(raw_content)
+                story_text = parsed.get("text", "")
+                words_in_story = story_text.split()
+
+                if 40 <= len(words_in_story) <= 100:
+                    parsed["word_count"] = len(words_in_story)
+                    parsed["theme"] = theme
+                    parsed["grade_level"] = grade_level
+                    parsed["language"] = language
+                    parsed["generator_source"] = f"Groq {groq_model}"
+                    print(
+                        f"[Groq] Story generated with {groq_model} "
+                        f"({len(words_in_story)} words)."
+                    )
+                    return parsed
+
+                fallback_reason = (
+                    f"Groq returned an invalid word count: "
+                    f"{len(words_in_story)}"
+                )
+                print(f"[Groq Error] {fallback_reason}")
+
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
+            fallback_reason = f"Groq response was malformed: {e}"
+            print(f"[Groq Error] {fallback_reason}")
+        except httpx.TimeoutException as e:
+            fallback_reason = f"Groq request timed out: {e}"
+            print(f"[Groq Error] {fallback_reason}")
+        except httpx.RequestError as e:
+            fallback_reason = f"Groq network request failed: {e}"
+            print(f"[Groq Error] {fallback_reason}")
+        except Exception as e:
+            fallback_reason = f"Groq {type(e).__name__}: {e}"
+            print(f"[Groq Error] {fallback_reason}")
+    else:
+        fallback_reason = f"{fallback_reason}; GROQ_API_KEY is not configured"
+
     # High quality, deterministic fallback generator guarantees 60-80 words & all target words
-    print(f"[Gemini] Using deterministic fallback ({fallback_reason}).")
+    print(f"[Story Generation] Using deterministic fallback ({fallback_reason}).")
     return build_deterministic_remediation_story(
         target_words=target_words_list,
         grade_level=grade_level,
