@@ -360,7 +360,7 @@ export const EvaluationModal: React.FC<EvaluationModalProps> = ({
             </div>
           )}
 
-          {/* Adaptive Story Generator (Gemini Powered) */}
+          {/* Adaptive Story Generator */}
           {remediationPreview ? (
             <div className="p-4 rounded-2xl bg-indigo-50/80 border border-indigo-200 animate-in fade-in">
               <div className="flex items-center justify-between mb-2">
@@ -385,7 +385,7 @@ export const EvaluationModal: React.FC<EvaluationModalProps> = ({
               {isGeneratingStory ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Synthesizing Adaptive Story via Gemini...</span>
+                  <span>Synthesizing adaptive story...</span>
                 </>
               ) : (
                 <>

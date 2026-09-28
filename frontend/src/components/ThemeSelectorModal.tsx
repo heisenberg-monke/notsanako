@@ -216,7 +216,7 @@ export const ThemeSelectorModal: React.FC<ThemeSelectorModalProps> = ({
           {isGenerating ? (
             <>
               <Loader2 className="w-5 h-5 animate-spin" />
-              <span>Generating Custom 60–80 Word Story via Gemini...</span>
+              <span>Generating your personalized 60–80 word story...</span>
             </>
           ) : (
             <>

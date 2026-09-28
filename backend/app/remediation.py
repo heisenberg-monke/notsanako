@@ -2,9 +2,9 @@
 AI-Powered Remediation Engine for Adaptive Reading Coach.
 1. Ranks student errors by frequency and severity (Matra, Conjunct, Phonetic, Hesitations).
 2. Selects 3-5 priority target words for remediation.
-3. Generates a 60-80 word personalized mini-story using Gemini 1.5 (with strict JSON output).
+3. Generates a 60-80 word personalized mini-story using Gemini, OpenAI, or Groq.
 4. Ensures every target word appears naturally 1-2 times in an engaging, grade-appropriate narrative.
-5. Provides robust deterministic fallback generation if API is unavailable or returns malformed output.
+5. Reports an error when all configured AI providers are unavailable or return malformed output.
 """
 
 import asyncio
@@ -49,6 +49,23 @@ THEME_TEMPLATES = {
         "keywords_hi": ["त्योहार", "दीपक", "मिठाई", "मेला", "खुशी"]
     }
 }
+
+
+class StoryGenerationError(RuntimeError):
+    """Raised when every configured story-generation provider fails."""
+
+
+def _format_provider_http_error(provider: str, response: httpx.Response) -> str:
+    try:
+        error = response.json().get("error", {})
+        detail = error.get("message") or error.get("detail")
+    except (ValueError, AttributeError):
+        detail = None
+
+    if detail:
+        detail = " ".join(str(detail).split())[:300]
+        return f"{provider} returned HTTP {response.status_code}: {detail}"
+    return f"{provider} returned HTTP {response.status_code}"
 
 
 def rank_and_select_target_words(
@@ -115,7 +132,7 @@ async def generate_remediation_story_gemini(
     theme: str = "space"
 ) -> Dict[str, Any]:
     """
-    Generates a 60-80 word structured mini-story embedding target words using Gemini 1.5.
+    Generates a 60-80 word structured mini-story using Gemini, OpenAI, or Groq.
     Returns strictly structured JSON with:
       - title
       - text (60-80 words)
@@ -167,6 +184,7 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
   ]
 }}
 """
+    failure_reasons = []
     fallback_reason = "GEMINI_API_KEY is not configured"
     if gemini_key:
         try:
@@ -212,7 +230,7 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                             break
 
                         if res.status_code != 200:
-                            fallback_reason = f"{model} returned HTTP {res.status_code}"
+                            fallback_reason = _format_provider_http_error(model, res)
                             print(
                                 f"[Gemini Error] HTTP {res.status_code}: "
                                 f"{res.text[:2000]}"
@@ -281,6 +299,9 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
         except Exception as e:
             fallback_reason = f"{type(e).__name__}: {e}"
             print(f"[Gemini Error] Unexpected failure: {fallback_reason}")
+        failure_reasons.append(f"Gemini: {fallback_reason}")
+    else:
+        failure_reasons.append("Gemini: GEMINI_API_KEY is not configured")
 
     openai_key = os.getenv("OPENAI_API_KEY")
     if openai_key:
@@ -306,7 +327,7 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                 )
 
             if response.status_code != 200:
-                fallback_reason = f"OpenAI returned HTTP {response.status_code}"
+                fallback_reason = _format_provider_http_error("OpenAI", response)
                 print(
                     f"[OpenAI Error] HTTP {response.status_code}: "
                     f"{response.text[:2000]}"
@@ -359,8 +380,9 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
         except Exception as e:
             fallback_reason = f"OpenAI {type(e).__name__}: {e}"
             print(f"[OpenAI Error] {fallback_reason}")
+        failure_reasons.append(f"OpenAI: {fallback_reason}")
     else:
-        fallback_reason = f"{fallback_reason}; OPENAI_API_KEY is not configured"
+        failure_reasons.append("OpenAI: OPENAI_API_KEY is not configured")
 
     groq_key = os.getenv("GROQ_API_KEY")
     if groq_key:
@@ -389,7 +411,7 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                 )
 
             if response.status_code != 200:
-                fallback_reason = f"Groq returned HTTP {response.status_code}"
+                fallback_reason = _format_provider_http_error("Groq", response)
                 print(
                     f"[Groq Error] HTTP {response.status_code}: "
                     f"{response.text[:2000]}"
@@ -431,96 +453,17 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
         except Exception as e:
             fallback_reason = f"Groq {type(e).__name__}: {e}"
             print(f"[Groq Error] {fallback_reason}")
+        failure_reasons.append(f"Groq: {fallback_reason}")
     else:
-        fallback_reason = f"{fallback_reason}; GROQ_API_KEY is not configured"
+        failure_reasons.append("Groq: GROQ_API_KEY is not configured")
 
-    # High quality, deterministic fallback generator guarantees 60-80 words & all target words
-    print(f"[Story Generation] Using deterministic fallback ({fallback_reason}).")
-    return build_deterministic_remediation_story(
-        target_words=target_words_list,
-        grade_level=grade_level,
-        language=language,
-        student_name=student_name,
-        theme=theme
+    error = (
+        "All story-generation providers failed. "
+        + " | ".join(failure_reasons)
+        + ". Check provider keys, quotas, and service availability."
     )
-
-
-def build_deterministic_remediation_story(
-    target_words: List[str],
-    grade_level: int = 4,
-    language: str = "hi",
-    student_name: str = "Aarav",
-    theme: str = "space"
-) -> Dict[str, Any]:
-    """
-    Robust fallback that guarantees:
-    - 60-80 words
-    - Every target word appears 1-2 times
-    - Valid structured schema with sentence list and word occurrence map
-    """
-    theme_info = THEME_TEMPLATES.get(theme, THEME_TEMPLATES["space"])
-
-    if language == "hi":
-        w1 = target_words[0] if len(target_words) > 0 else "साहस"
-        w2 = target_words[1] if len(target_words) > 1 else "परिश्रम"
-        w3 = target_words[2] if len(target_words) > 2 else "बुद्धिमान"
-        w4 = target_words[3] if len(target_words) > 3 else "प्रशंसा"
-        w5 = target_words[4] if len(target_words) > 4 else w1
-
-        title = f"{student_name} का नया सफर"
-        s1 = f"एक सुनहरी सुबह {student_name} ने आसमान की ओर देखा और एक नया सपना संजोया।"
-        s2 = f"उन्होंने जाना कि किसी भी मुश्किल काम में {w1} और {w2} सबसे सच्चे साथी होते हैं।"
-        s3 = f"जब उन्होंने अपनी नई योजना बनाई, तो एक {w3} बालक की तरह हर बात को गहराई से समझा।"
-        s4 = f"गुरुजी ने {student_name} के काम की {w4} की और कहा कि {w1} से हर लक्ष्य प्राप्त होता है।"
-        s5 = f"शाम को गाँव के सभी लोगों ने {w5} की सराहना की और मुस्कुराते हुए उनका हौसला बढ़ाया।"
-
-        sentences = [s1, s2, s3, s4, s5]
-        full_text = " ".join(sentences)
-
-    else:
-        w1 = target_words[0] if len(target_words) > 0 else "curiosity"
-        w2 = target_words[1] if len(target_words) > 1 else "balanced"
-        w3 = target_words[2] if len(target_words) > 2 else "sparked"
-        w4 = target_words[3] if len(target_words) > 3 else "cheerful"
-        w5 = target_words[4] if len(target_words) > 4 else w1
-
-        title = f"{student_name}'s Bright Adventure"
-        s1 = f"Early one sunny morning, young {student_name} embarked on an inspiring journey across the valley."
-        s2 = f"To succeed in this quest, having pure {w1} and a steady mind proved essential."
-        s3 = f"Along the breezy trail, walking with a {w2} pace helped overcome every steep hill."
-        s4 = f"A kind teacher smiled warmly and noted how this effort {w3} immense hope in everyone."
-        s5 = f"Soon, the {w4} companions gathered together to celebrate their shared triumph with great {w5}."
-
-        sentences = [s1, s2, s3, s4, s5]
-        full_text = " ".join(sentences)
-
-    # Build target word occurrences map
-    occurrences = []
-    full_lower = full_text.lower()
-    for w in target_words:
-        matched_sentences = []
-        count = 0
-        for s_idx, s in enumerate(sentences):
-            if w.lower() in s.lower():
-                matched_sentences.append(s_idx)
-                count += s.lower().count(w.lower())
-        occurrences.append({
-            "word": w,
-            "occurrences_count": max(1, count),
-            "sentence_indices": matched_sentences or [0]
-        })
-
-    return {
-        "title": title,
-        "text": full_text,
-        "sentences": sentences,
-        "target_word_occurrences": occurrences,
-        "word_count": len(full_text.split()),
-        "theme": theme,
-        "grade_level": grade_level,
-        "language": language,
-        "generator_source": "Deterministic Template Fallback"
-    }
+    print(f"[Story Generation Error] {error}")
+    raise StoryGenerationError(error)
 
 
 def calculate_remediation_delta(

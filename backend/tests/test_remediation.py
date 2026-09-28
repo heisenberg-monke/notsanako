@@ -1,14 +1,9 @@
 """
-Tests for error ranking, target word selection, delta calculation,
-and Gemini story generation (fully mocked — no real API calls).
+Tests for error ranking, target word selection, and delta calculation.
 """
-import pytest
-from unittest.mock import AsyncMock, patch
-
 from app.remediation import (
     rank_and_select_target_words,
     calculate_remediation_delta,
-    build_deterministic_remediation_story,
     ERROR_SEVERITY_WEIGHTS,
 )
 
@@ -129,48 +124,3 @@ class TestErrorSeverityWeights:
         assert ERROR_SEVERITY_WEIGHTS["REPETITION"] <= min(
             v for k, v in ERROR_SEVERITY_WEIGHTS.items() if k != "REPETITION"
         )
-
-
-class TestDeterministicFallback:
-    def test_hindi_fallback_has_required_keys(self):
-        result = build_deterministic_remediation_story(
-            target_words=["प्रकाश", "किताब", "तारा"],
-            grade_level=4,
-            language="hi",
-            student_name="Aarav",
-            theme="space",
-        )
-        for key in ("title", "text", "sentences", "word_count", "generator_source"):
-            assert key in result, f"Missing key: {key}"
-
-    def test_english_fallback_has_required_keys(self):
-        result = build_deterministic_remediation_story(
-            target_words=["curiosity", "balanced", "sparked"],
-            grade_level=4,
-            language="en",
-            student_name="Aarav",
-            theme="space",
-        )
-        for key in ("title", "text", "sentences", "word_count"):
-            assert key in result
-
-    def test_fallback_word_count_reasonable(self):
-        result = build_deterministic_remediation_story(
-            target_words=["प्रकाश"],
-            grade_level=4,
-            language="hi",
-            student_name="Aarav",
-            theme="space",
-        )
-        # Should be a non-trivial story
-        assert result["word_count"] >= 30
-
-    def test_fallback_contains_target_words(self):
-        result = build_deterministic_remediation_story(
-            target_words=["प्रकाश"],
-            grade_level=4,
-            language="hi",
-            student_name="Aarav",
-            theme="space",
-        )
-        assert "प्रकाश" in result["text"]

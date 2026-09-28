@@ -1,7 +1,7 @@
 """
 FastAPI Backend for Adaptive Reading Coach.
 Complete Adaptive Remediation Cycle:
-Baseline -> Diagnose -> Micro-Feedback -> Generate Personalized Story (Gemini 1.5) -> Retest -> Delta Evaluation.
+Baseline -> Diagnose -> Micro-Feedback -> Generate Personalized Story (Gemini/OpenAI/Groq) -> Retest -> Delta Evaluation.
 
 Teacher Ecosystem:
 PostgreSQL/SQLite-backed roster management, class dashboard analytics,
@@ -39,7 +39,8 @@ STTConfigurationError = STTNotConfiguredError
 from app.remediation import (
     rank_and_select_target_words,
     generate_remediation_story_gemini,
-    calculate_remediation_delta
+    calculate_remediation_delta,
+    StoryGenerationError,
 )
 from app.db import init_db
 from app.scheduler import start_scheduler, stop_scheduler
@@ -494,19 +495,6 @@ async def analyze_reading(
         "wcpm": evaluation["metrics"].get("wcpm"), "session_id": session_id,
     })
 
-    target_words = [item["word"] for item in ranked_targets]
-
-    remediation_passage = None
-
-    if target_words:
-        remediation_passage = await generate_remediation_story_gemini(
-            target_words=target_words,
-            grade_level=passage.get("grade_level", 4),
-            language=language,
-            student_name=student_id or "Aarav",
-            theme="space",
-        )
-
     result = {
         "session_id": session_id,
         "passage_id": passage_id,
@@ -519,7 +507,6 @@ async def analyze_reading(
         "error_breakdown": evaluation["error_breakdown"],
         "structured_errors": evaluation["structured_errors"],
         "priority_target_words": ranked_targets,
-        "remediation_passage": remediation_passage,
         "stumble_clusters": evaluation["stumble_clusters"],
         "long_pauses": evaluation["long_pauses"],
         "feedback": evaluation["feedback"],
@@ -549,14 +536,17 @@ async def rank_and_generate_remediation(request: RemediationGenerateRequest):
     else:
         target_words = ["प्रतियोगिता", "परिश्रमी", "बुद्धिमान"] if request.language == "hi" else ["curiosity", "balanced", "sparked"]
 
-    # 2. Call Gemini 1.5 (with strict JSON structure and deterministic fallback)
-    story_result = await generate_remediation_story_gemini(
-        target_words=target_words,
-        grade_level=request.grade_level,
-        language=request.language,
-        student_name=request.student_name,
-        theme=request.theme
-    )
+    # 2. Try Gemini, OpenAI, then Groq. Report provider failures if all fail.
+    try:
+        story_result = await generate_remediation_story_gemini(
+            target_words=target_words,
+            grade_level=request.grade_level,
+            language=request.language,
+            student_name=request.student_name,
+            theme=request.theme
+        )
+    except StoryGenerationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return {
         "target_words": target_words,

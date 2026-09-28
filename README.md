@@ -89,7 +89,7 @@ Indic Linguistic Diagnosis (Matra, Conjunct, Phonetic, WCPM, Pauses >1.5s, 3+ St
 Pedagogical Error Ranking (Top 3-5 Priority Target Words)
        │
        ▼
-Personalized Remediation Story Generation (Gemini 1.5: 60-80 words, Target Words Embedded 1-2x)
+Personalized Remediation Story Generation (Gemini, OpenAI, then Groq: 60-80 words, target words embedded 1-2x; shows an error if all providers fail)
        │
        ▼
 Retest Reading (MediaRecorder Audio Captured)

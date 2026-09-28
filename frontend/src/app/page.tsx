@@ -228,13 +228,9 @@ export default function Home() {
     setIsThemeModalOpen(true);
   };
 
-  // Step 3: Call Gemini / Backend to Generate Custom Remediation Story
+  // Step 3: Request a personalized story from the backend AI providers
   const handleGenerateStory = async (theme: string, studentName: string) => {
-        console.log('[PAGE] handleGenerateStory CALLED', {
-        theme,
-        studentName,
-    });
-
+    let failureMessage = '';
     setIsGeneratingStory(true);
     try {
       const targetWords = priorityTargetWords.map((tw) => tw.word);
@@ -252,49 +248,71 @@ export default function Home() {
         }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        setRemediationPassage(data.remediation_passage);
-        setIsThemeModalOpen(false);
-        setSessionStage('REMEDIATION_RETEST');
-        return;
+      let data: any;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
       }
+
+      if (!res.ok) {
+        const detail = typeof data?.detail === 'string' ? data.detail : `Request failed (HTTP ${res.status}).`;
+        throw new Error(detail);
+      }
+
+      const generatedPassage = data?.remediation_passage ?? data?.passage;
+      const generatedText =
+        typeof generatedPassage === 'string'
+          ? generatedPassage
+          : generatedPassage?.text ?? generatedPassage?.remediation_story;
+
+      if (typeof generatedText !== 'string' || !generatedText.trim()) {
+        throw new Error('The story service returned an empty or unreadable passage.');
+      }
+
+      const normalizedPassage: RemediationPassage = {
+        title:
+          typeof generatedPassage === 'object' && generatedPassage?.title
+            ? generatedPassage.title
+            : selectedLanguage === 'hi'
+              ? `${studentName} की अभ्यास कहानी`
+              : `${studentName}'s Practice Story`,
+        text: generatedText.trim(),
+        sentences:
+          typeof generatedPassage === 'object' && Array.isArray(generatedPassage?.sentences)
+            ? generatedPassage.sentences
+            : [generatedText.trim()],
+        target_word_occurrences:
+          typeof generatedPassage === 'object' && Array.isArray(generatedPassage?.target_word_occurrences)
+            ? generatedPassage.target_word_occurrences
+            : targetWords.map((word) => ({
+                word,
+                occurrences_count: 1,
+                sentence_indices: [0],
+              })),
+        word_count:
+          typeof generatedPassage === 'object' && Number.isFinite(generatedPassage?.word_count)
+            ? generatedPassage.word_count
+            : generatedText.trim().split(/\s+/).length,
+        theme: generatedPassage?.theme || theme,
+        grade_level: generatedPassage?.grade_level || selectedGrade,
+        language: generatedPassage?.language || selectedLanguage,
+        generator_source: generatedPassage?.generator_source || 'AI',
+      };
+
+      setRemediationPassage(normalizedPassage);
+      setIsThemeModalOpen(false);
+      setSessionStage('REMEDIATION_RETEST');
     } catch (err) {
-      console.warn('Backend story generation failed, using local deterministic story:', err);
+      failureMessage = err instanceof Error ? err.message : 'Unknown story-generation error.';
+      console.error('Story generation failed:', failureMessage);
     } finally {
       setIsGeneratingStory(false);
     }
 
-    // Local fallback 60-80 word structured story
-    const targetWords = priorityTargetWords.map((tw) => tw.word);
-    const w1 = targetWords[0] || 'साहस';
-    const w2 = targetWords[1] || 'परिश्रम';
-    const w3 = targetWords[2] || 'बुद्धिमान';
-    const w4 = targetWords[3] || 'प्रशंसा';
-
-    const fallbackStoryText = selectedLanguage === 'hi'
-      ? `एक सुनहरी सुबह ${studentName} ने अपनी नई उड़ान शुरू की। उन्होंने जाना कि जीवन में ${w1} और ${w2} सबसे सच्चे साथी हैं। जब भी कोई नई चुनौती आई, उन्होंने एक ${w3} बालक की तरह हर बात को ध्यान से समझा। गुरुजी ने उनके लगन की ${w4} की और कहा कि ${w1} से हर लक्ष्य प्राप्त होता है। सभी ने तालियाँ बजाकर उनका हौसला बढ़ाया।`
-      : `Early one sunny morning, young ${studentName} embarked on an inspiring journey across the valley. Having pure ${w1} and a steady mind proved essential for every challenge. Along the breezy path, walking with a ${w2} spirit helped overcome every steep hill. A kind guide smiled warmly and noted how this effort ${w3} immense joy in everyone. Soon, the companions celebrated their triumph with great ${w4}.`;
-
-    const fallbackRemediation: RemediationPassage = {
-      title: `${studentName} का नया सफर`,
-      text: fallbackStoryText,
-      sentences: [fallbackStoryText],
-      target_word_occurrences: targetWords.map((w) => ({
-        word: w,
-        occurrences_count: 1,
-        sentence_indices: [0],
-      })),
-      word_count: fallbackStoryText.split(/\s+/).length,
-      theme: theme,
-      grade_level: selectedGrade,
-      language: selectedLanguage,
-      generator_source: 'Local Fallback',
-    };
-
-    setRemediationPassage(fallbackRemediation);
-    setIsThemeModalOpen(false);
-    setSessionStage('REMEDIATION_RETEST');
+    if (failureMessage) {
+      window.alert(`Could not generate a practice story.\n\n${failureMessage}`);
+    }
   };
 
   // Step 4: Retest Audio Completed -> Evaluate Delta Improvement
@@ -546,7 +564,7 @@ export default function Home() {
         }}
       />
 
-      {/* Step 3: Theme Selector & Gemini Generator Modal */}
+      {/* Step 3: Theme Selector & AI Story Generator Modal */}
       <ThemeSelectorModal
         isOpen={isThemeModalOpen}
         onClose={() => setIsThemeModalOpen(false)}
