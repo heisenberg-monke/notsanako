@@ -68,6 +68,25 @@ def _format_provider_http_error(provider: str, response: httpx.Response) -> str:
     return f"{provider} returned HTTP {response.status_code}"
 
 
+def _parse_json_object(raw_content: str) -> Dict[str, Any]:
+    """Parse a JSON object even if the model surrounds it with prose or fences."""
+    content = raw_content.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(content):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(content[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("response did not contain a valid JSON object")
+
+
 def rank_and_select_target_words(
     structured_errors: List[Dict[str, Any]],
     max_targets: int = 5
@@ -399,51 +418,6 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                 },
                 {"role": "user", "content": prompt},
             ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "remediation_story",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string"},
-                            "text": {"type": "string"},
-                            "sentences": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                            "target_word_occurrences": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "word": {"type": "string"},
-                                        "occurrences_count": {"type": "integer"},
-                                        "sentence_indices": {
-                                            "type": "array",
-                                            "items": {"type": "integer"},
-                                        },
-                                    },
-                                    "required": [
-                                        "word",
-                                        "occurrences_count",
-                                        "sentence_indices",
-                                    ],
-                                    "additionalProperties": False,
-                                },
-                            },
-                        },
-                        "required": [
-                            "title",
-                            "text",
-                            "sentences",
-                            "target_word_occurrences",
-                        ],
-                        "additionalProperties": False,
-                    },
-                },
-            },
         }
 
         try:
@@ -463,7 +437,7 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
             else:
                 response_json = response.json()
                 raw_content = response_json["choices"][0]["message"]["content"]
-                parsed = json.loads(raw_content)
+                parsed = _parse_json_object(raw_content)
                 story_text = parsed.get("text", "")
                 words_in_story = story_text.split()
 
