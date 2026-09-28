@@ -7,6 +7,7 @@ AI-Powered Remediation Engine for Adaptive Reading Coach.
 5. Provides robust deterministic fallback generation if API is unavailable or returns malformed output.
 """
 
+import asyncio
 import os
 import re
 import json
@@ -135,6 +136,7 @@ async def generate_remediation_story_gemini(
     target_words_list = [normalize_devanagari(w) for w in target_words]
     words_formatted = ", ".join(f'"{w}"' for w in target_words_list)
 
+    fallback_reason = "GEMINI_API_KEY is not configured"
     if gemini_key:
         try:
             lang_instruction = (
@@ -169,12 +171,6 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
   ]
 }}
 """
-                        # Gemini 3.8 Flash
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/"
-                f"models/gemini-3.8-flash:generateContent?key={gemini_key}"
-            )
-
             payload = {
                 "contents": [
                     {
@@ -186,116 +182,109 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                     }
                 ],
                 "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "temperature": 0.4
+                    "responseMimeType": "application/json"
                 }
             }
 
-            print("🔥 ABOUT TO CALL GEMINI")
-            print(f"🔥 GEMINI KEY EXISTS: {bool(gemini_key)}")
-            print(f"🔥 GEMINI URL: {url.split('?')[0]}")
-
             async with httpx.AsyncClient(timeout=30.0) as client:
-                print("🔥 GEMINI REQUEST SENT")
-
-                res = await client.post(url, json=payload)
-
-                print(f"🔥 GEMINI RESPONSE STATUS: {res.status_code}")
-                print(f"🔥 GEMINI RESPONSE: {res.text[:3000]}")
-
-                # IMPORTANT: log the actual Gemini error instead of
-                # silently falling back.
-                if res.status_code != 200:
-                    print(
-                        f"[Gemini Error] HTTP {res.status_code}: "
-                        f"{res.text[:2000]}"
+                models = ["gemini-3.8-flash", "gemini-3.7-flash"]
+                for model_index, model in enumerate(models):
+                    url = (
+                        "https://generativelanguage.googleapis.com/v1beta/"
+                        f"models/{model}:generateContent"
                     )
-                else:
-                    try:
-                        response_json = res.json()
+                    max_attempts = 2 if model_index == 0 else 1
 
-                        raw_content = (
-                            response_json["candidates"][0]
-                            ["content"]["parts"][0]["text"]
-                            .strip()
+                    for attempt in range(max_attempts):
+                        res = await client.post(
+                            url,
+                            headers={"x-goog-api-key": gemini_key},
+                            json=payload,
                         )
 
-                        # Remove accidental markdown code fences.
-                        clean_json = re.sub(
-                            r"^```json\s*|^```\s*|```$",
-                            "",
-                            raw_content
-                        ).strip()
+                        if res.status_code == 503:
+                            fallback_reason = f"{model} returned HTTP 503"
+                            print(f"[Gemini Error] {fallback_reason}")
+                            if model_index == 0 and attempt == 0:
+                                await asyncio.sleep(1)
+                                continue
+                            if model_index == 0:
+                                break
+                            break
 
-                        parsed = json.loads(clean_json)
-
-                        # Validate story text.
-                        story_text = parsed.get("text", "")
-                        words_in_story = story_text.split()
-
-                        if 40 <= len(words_in_story) <= 100:
-                            parsed["word_count"] = len(words_in_story)
-                            parsed["theme"] = theme
-                            parsed["grade_level"] = grade_level
-                            parsed["language"] = language
-                            parsed["generator_source"] = "Gemini 3.8 Flash"
-
+                        if res.status_code != 200:
+                            fallback_reason = f"{model} returned HTTP {res.status_code}"
                             print(
-                                "[Gemini] Story generated successfully "
-                                f"({len(words_in_story)} words)."
+                                f"[Gemini Error] HTTP {res.status_code}: "
+                                f"{res.text[:2000]}"
+                            )
+                            break
+
+                        try:
+                            response_json = res.json()
+                            raw_content = (
+                                response_json["candidates"][0]
+                                ["content"]["parts"][0]["text"]
+                                .strip()
                             )
 
-                            return parsed
+                            clean_json = re.sub(
+                                r"^```json\s*|^```\s*|```$",
+                                "",
+                                raw_content
+                            ).strip()
+                            parsed = json.loads(clean_json)
+                            story_text = parsed.get("text", "")
+                            words_in_story = story_text.split()
 
-                        print(
-                            "[Gemini Error] Gemini returned an invalid "
-                            f"word count: {len(words_in_story)}"
-                        )
+                            if 40 <= len(words_in_story) <= 100:
+                                parsed["word_count"] = len(words_in_story)
+                                parsed["theme"] = theme
+                                parsed["grade_level"] = grade_level
+                                parsed["language"] = language
+                                parsed["generator_source"] = model
+                                print(
+                                    f"[Gemini] Story generated with {model} "
+                                    f"({len(words_in_story)} words)."
+                                )
+                                return parsed
 
-                    except (KeyError, IndexError, json.JSONDecodeError) as e:
-                        print(
-                            "[Gemini Error] Could not parse Gemini response: "
-                            f"{e}"
-                        )
-                        print(
-                            f"[Gemini Raw Response] {res.text[:3000]}"
-                        )
+                            fallback_reason = (
+                                f"{model} returned an invalid word count: "
+                                f"{len(words_in_story)}"
+                            )
+                            print(f"[Gemini Error] {fallback_reason}")
+                            break
+
+                        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+                            fallback_reason = f"{model} response was malformed: {e}"
+                            print(f"[Gemini Error] {fallback_reason}")
+                            print(f"[Gemini Raw Response] {res.text[:3000]}")
+                            break
+
+                    # Move to the secondary model only after Gemini 3.8 is
+                    # unavailable or returns a response we cannot use.
+                    if model_index == 0 and not (
+                        fallback_reason.startswith("gemini-3.8-flash returned HTTP 503")
+                        or fallback_reason.startswith("gemini-3.8-flash response was malformed")
+                        or fallback_reason.startswith("gemini-3.8-flash returned an invalid")
+                    ):
+                        break
 
         except httpx.TimeoutException as e:
+            fallback_reason = f"Gemini request timed out: {e}"
             print(f"[Gemini Error] Request timed out: {e}")
 
         except httpx.RequestError as e:
+            fallback_reason = f"Gemini network request failed: {e}"
             print(f"[Gemini Error] Network request failed: {e}")
 
         except Exception as e:
-            print(
-                f"[Gemini Error] Unexpected failure: "
-                f"{type(e).__name__}: {e}"
-            )
-
-            async with httpx.AsyncClient(timeout=25.0) as client:
-                res = await client.post(url, json=payload)
-                if res.status_code == 200:
-                    raw_content = res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    # Clean any accidental markdown code fence
-                    clean_json = re.sub(r'^```json\s*|^```\s*|```$', '', raw_content).strip()
-                    parsed = json.loads(clean_json)
-
-                    # Validate story text length and content
-                    story_text = parsed.get("text", "")
-                    words_in_story = story_text.split()
-                    if len(words_in_story) >= 40:
-                        parsed["word_count"] = len(words_in_story)
-                        parsed["theme"] = theme
-                        parsed["grade_level"] = grade_level
-                        parsed["language"] = language
-                        parsed["generator_source"] = "Gemini 1.5 Flash"
-                        return parsed
-
-        except Exception as e:
-            print(f"[Remediation Error] Gemini LLM generation failed or malformed: {e}. Using deterministic fallback.")
+            fallback_reason = f"{type(e).__name__}: {e}"
+            print(f"[Gemini Error] Unexpected failure: {fallback_reason}")
 
     # High quality, deterministic fallback generator guarantees 60-80 words & all target words
+    print(f"[Gemini] Using deterministic fallback ({fallback_reason}).")
     return build_deterministic_remediation_story(
         target_words=target_words_list,
         grade_level=grade_level,
