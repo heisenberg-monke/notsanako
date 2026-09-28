@@ -49,10 +49,17 @@ from app.routers.consent import router as consent_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init DB tables + start digest scheduler. Shutdown: stop scheduler."""
+    """Startup: initialize all DB tables before starting scheduler."""
+    print("[Startup] Initializing database...")
     init_db()
+    print("[Startup] Database initialized successfully.")
+
+    print("[Startup] Starting digest scheduler...")
     start_scheduler()
+    print("[Startup] Digest scheduler started.")
+
     yield
+
     stop_scheduler()
 
 
