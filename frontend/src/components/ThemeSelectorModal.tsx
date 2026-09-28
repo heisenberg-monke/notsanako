@@ -85,8 +85,17 @@ export const ThemeSelectorModal: React.FC<ThemeSelectorModalProps> = ({
   };
 
   const handleSubmit = async () => {
-    await onGenerateStory(selectedTheme, studentName.trim() || (language === 'hi' ? 'विद्यार्थी' : 'Learner'));
-  };
+  const name =
+    studentName.trim() ||
+    (language === 'hi' ? 'विद्यार्थी' : 'Learner');
+
+  console.log('[ThemeSelectorModal] Generating story:', {
+    theme: selectedTheme,
+    studentName: name,
+  });
+
+  await onGenerateStory(selectedTheme, name);
+};
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
