@@ -399,7 +399,51 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                 },
                 {"role": "user", "content": prompt},
             ],
-            "response_format": {"type": "json_object"},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "remediation_story",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "text": {"type": "string"},
+                            "sentences": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "target_word_occurrences": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "word": {"type": "string"},
+                                        "occurrences_count": {"type": "integer"},
+                                        "sentence_indices": {
+                                            "type": "array",
+                                            "items": {"type": "integer"},
+                                        },
+                                    },
+                                    "required": [
+                                        "word",
+                                        "occurrences_count",
+                                        "sentence_indices",
+                                    ],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": [
+                            "title",
+                            "text",
+                            "sentences",
+                            "target_word_occurrences",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
         }
 
         try:
