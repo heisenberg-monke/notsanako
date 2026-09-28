@@ -122,6 +122,12 @@ async def generate_remediation_story_gemini(
       - target_word_occurrences (list of word map occurrences)
       - grade_level, theme, language
     """
+    print("🔥 GEMINI FUNCTION CALLED")
+    print(f"🔥 target_words={target_words}")
+    print(f"🔥 grade_level={grade_level}")
+    print(f"🔥 language={language}")
+    print(f"🔥 theme={theme}")
+
     gemini_key = os.getenv("GEMINI_API_KEY")
     theme_info = THEME_TEMPLATES.get(theme, THEME_TEMPLATES["space"])
     theme_label = theme_info["label"]
@@ -185,8 +191,17 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                 }
             }
 
+            print("🔥 ABOUT TO CALL GEMINI")
+            print(f"🔥 GEMINI KEY EXISTS: {bool(gemini_key)}")
+            print(f"🔥 GEMINI URL: {url.split('?')[0]}")
+
             async with httpx.AsyncClient(timeout=30.0) as client:
+                print("🔥 GEMINI REQUEST SENT")
+
                 res = await client.post(url, json=payload)
+
+                print(f"🔥 GEMINI RESPONSE STATUS: {res.status_code}")
+                print(f"🔥 GEMINI RESPONSE: {res.text[:3000]}")
 
                 # IMPORTANT: log the actual Gemini error instead of
                 # silently falling back.
