@@ -163,14 +163,100 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
   ]
 }}
 """
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+                        # Gemini 3.8 Flash
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/"
+                f"models/gemini-3.8-flash:generateContent?key={gemini_key}"
+            )
+
             payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ],
                 "generationConfig": {
                     "responseMimeType": "application/json",
                     "temperature": 0.4
                 }
             }
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                res = await client.post(url, json=payload)
+
+                # IMPORTANT: log the actual Gemini error instead of
+                # silently falling back.
+                if res.status_code != 200:
+                    print(
+                        f"[Gemini Error] HTTP {res.status_code}: "
+                        f"{res.text[:2000]}"
+                    )
+                else:
+                    try:
+                        response_json = res.json()
+
+                        raw_content = (
+                            response_json["candidates"][0]
+                            ["content"]["parts"][0]["text"]
+                            .strip()
+                        )
+
+                        # Remove accidental markdown code fences.
+                        clean_json = re.sub(
+                            r"^```json\s*|^```\s*|```$",
+                            "",
+                            raw_content
+                        ).strip()
+
+                        parsed = json.loads(clean_json)
+
+                        # Validate story text.
+                        story_text = parsed.get("text", "")
+                        words_in_story = story_text.split()
+
+                        if 40 <= len(words_in_story) <= 100:
+                            parsed["word_count"] = len(words_in_story)
+                            parsed["theme"] = theme
+                            parsed["grade_level"] = grade_level
+                            parsed["language"] = language
+                            parsed["generator_source"] = "Gemini 3.8 Flash"
+
+                            print(
+                                "[Gemini] Story generated successfully "
+                                f"({len(words_in_story)} words)."
+                            )
+
+                            return parsed
+
+                        print(
+                            "[Gemini Error] Gemini returned an invalid "
+                            f"word count: {len(words_in_story)}"
+                        )
+
+                    except (KeyError, IndexError, json.JSONDecodeError) as e:
+                        print(
+                            "[Gemini Error] Could not parse Gemini response: "
+                            f"{e}"
+                        )
+                        print(
+                            f"[Gemini Raw Response] {res.text[:3000]}"
+                        )
+
+        except httpx.TimeoutException as e:
+            print(f"[Gemini Error] Request timed out: {e}")
+
+        except httpx.RequestError as e:
+            print(f"[Gemini Error] Network request failed: {e}")
+
+        except Exception as e:
+            print(
+                f"[Gemini Error] Unexpected failure: "
+                f"{type(e).__name__}: {e}"
+            )
 
             async with httpx.AsyncClient(timeout=25.0) as client:
                 res = await client.post(url, json=payload)
