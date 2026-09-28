@@ -494,6 +494,19 @@ async def analyze_reading(
         "wcpm": evaluation["metrics"].get("wcpm"), "session_id": session_id,
     })
 
+    target_words = [item["word"] for item in ranked_targets]
+
+    remediation_passage = None
+
+    if target_words:
+        remediation_passage = await generate_remediation_story_gemini(
+            target_words=target_words,
+            grade_level=passage.get("grade_level", 4),
+            language=language,
+            student_name=student_id or "Aarav",
+            theme="space",
+        )
+
     result = {
         "session_id": session_id,
         "passage_id": passage_id,
@@ -506,10 +519,12 @@ async def analyze_reading(
         "error_breakdown": evaluation["error_breakdown"],
         "structured_errors": evaluation["structured_errors"],
         "priority_target_words": ranked_targets,
+        "remediation_passage": remediation_passage,
         "stumble_clusters": evaluation["stumble_clusters"],
         "long_pauses": evaluation["long_pauses"],
-        "feedback": evaluation["feedback"]
+        "feedback": evaluation["feedback"],
     }
+    
     # Signal to client that audio was NOT retained server-side
     response = Response(
         content=json.dumps(result, ensure_ascii=False),
