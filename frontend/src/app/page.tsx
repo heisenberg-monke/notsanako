@@ -230,12 +230,10 @@ export default function Home() {
 
   // Step 3: Call Gemini / Backend to Generate Custom Remediation Story
   const handleGenerateStory = async (theme: string, studentName: string) => {
-    console.log('[PAGE] handleGenerateStory called:', {
-    theme,
-    studentName,
-    priorityTargetWords,
-    structuredErrors: baselineAnalysis?.structured_errors,
-  });
+        console.log('[PAGE] handleGenerateStory CALLED', {
+        theme,
+        studentName,
+    });
 
     setIsGeneratingStory(true);
     try {
