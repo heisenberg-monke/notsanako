@@ -409,15 +409,41 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
             "GROQ_REMEDIATION_MODEL",
             "openai/gpt-oss-20b",
         )
+        groq_prompt = f"""
+Write a child-friendly story for Grade {grade_level}, in {"standard Hindi using Devanagari" if language == "hi" else "encouraging Indian English"}.
+The story should be 60 to 80 words, about {theme_label}, and feature {student_name}.
+Include each of these target words naturally one or two times: {words_formatted}.
+
+Return only a JSON object with exactly two string properties: "title" and "text".
+The "text" property must contain the complete story. Do not include markdown,
+reasoning, or any text outside the JSON object.
+"""
         groq_payload = {
             "model": groq_model,
+            "reasoning_effort": "low",
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are an expert children's reading coach. Follow the user's story requirements and return JSON only.",
+                    "content": "You write short stories for children. Output only the requested JSON object.",
                 },
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": groq_prompt},
             ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "remediation_story",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "text": {"type": "string"},
+                        },
+                        "required": ["title", "text"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
         }
 
         try:
@@ -442,6 +468,27 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                 words_in_story = story_text.split()
 
                 if 40 <= len(words_in_story) <= 100:
+                    sentences = [
+                        sentence.strip()
+                        for sentence in re.split(r"(?<=[.!?।])\s+", story_text.strip())
+                        if sentence.strip()
+                    ]
+                    parsed["sentences"] = sentences
+                    parsed["target_word_occurrences"] = [
+                        {
+                            "word": target,
+                            "occurrences_count": sum(
+                                sentence.lower().count(target.lower())
+                                for sentence in sentences
+                            ),
+                            "sentence_indices": [
+                                index
+                                for index, sentence in enumerate(sentences)
+                                if target.lower() in sentence.lower()
+                            ],
+                        }
+                        for target in target_words
+                    ]
                     parsed["word_count"] = len(words_in_story)
                     parsed["theme"] = theme
                     parsed["grade_level"] = grade_level
