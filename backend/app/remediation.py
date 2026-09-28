@@ -4,7 +4,7 @@ AI-Powered Remediation Engine for Adaptive Reading Coach.
 2. Selects 3-5 priority target words for remediation.
 3. Generates a 60-80 word personalized mini-story using Gemini, OpenAI, or Groq.
 4. Ensures every target word appears naturally 1-2 times in an engaging, grade-appropriate narrative.
-5. Reports an error when all configured AI providers are unavailable or return malformed output.
+5. Reports an error when all configured AI providers are unavailable or return malformed or wrong-language output.
 """
 
 import asyncio
@@ -85,6 +85,20 @@ def _parse_json_object(raw_content: str) -> Dict[str, Any]:
         if isinstance(parsed, dict):
             return parsed
     raise ValueError("response did not contain a valid JSON object")
+
+
+def _story_matches_language(story_text: str, language: str) -> bool:
+    """Reject story text whose dominant script conflicts with the requested language."""
+    devanagari_count = len(re.findall(r"[\u0900-\u097F]", story_text))
+    latin_count = len(re.findall(r"[A-Za-z]", story_text))
+    letter_count = devanagari_count + latin_count
+    if not letter_count:
+        return False
+
+    devanagari_ratio = devanagari_count / letter_count
+    if language == "hi":
+        return devanagari_ratio >= 0.25
+    return devanagari_ratio <= 0.15
 
 
 def rank_and_select_target_words(
@@ -274,16 +288,24 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                             words_in_story = story_text.split()
 
                             if 40 <= len(words_in_story) <= 100:
-                                parsed["word_count"] = len(words_in_story)
-                                parsed["theme"] = theme
-                                parsed["grade_level"] = grade_level
-                                parsed["language"] = language
-                                parsed["generator_source"] = model
-                                print(
-                                    f"[Gemini] Story generated with {model} "
-                                    f"({len(words_in_story)} words)."
+                                if _story_matches_language(story_text, language):
+                                    parsed["word_count"] = len(words_in_story)
+                                    parsed["theme"] = theme
+                                    parsed["grade_level"] = grade_level
+                                    parsed["language"] = language
+                                    parsed["generator_source"] = model
+                                    print(
+                                        f"[Gemini] Story generated with {model} "
+                                        f"({len(words_in_story)} words)."
+                                    )
+                                    return parsed
+
+                                fallback_reason = (
+                                    f"{model} returned a story in the wrong language "
+                                    f"(requested {language})"
                                 )
-                                return parsed
+                                print(f"[Gemini Error] {fallback_reason}")
+                                break
 
                             fallback_reason = (
                                 f"{model} returned an invalid word count: "
@@ -304,6 +326,7 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                         fallback_reason.startswith("gemini-3.8-flash returned HTTP 503")
                         or fallback_reason.startswith("gemini-3.8-flash response was malformed")
                         or fallback_reason.startswith("gemini-3.8-flash returned an invalid")
+                        or fallback_reason.startswith("gemini-3.8-flash returned a story in the wrong language")
                     ):
                         break
 
@@ -370,22 +393,29 @@ You MUST return ONLY a valid JSON object with EXACTLY this structure (no markdow
                 words_in_story = story_text.split()
 
                 if 40 <= len(words_in_story) <= 100:
-                    parsed["word_count"] = len(words_in_story)
-                    parsed["theme"] = theme
-                    parsed["grade_level"] = grade_level
-                    parsed["language"] = language
-                    parsed["generator_source"] = f"OpenAI {openai_model}"
-                    print(
-                        f"[OpenAI] Story generated with {openai_model} "
-                        f"({len(words_in_story)} words)."
-                    )
-                    return parsed
+                    if _story_matches_language(story_text, language):
+                        parsed["word_count"] = len(words_in_story)
+                        parsed["theme"] = theme
+                        parsed["grade_level"] = grade_level
+                        parsed["language"] = language
+                        parsed["generator_source"] = f"OpenAI {openai_model}"
+                        print(
+                            f"[OpenAI] Story generated with {openai_model} "
+                            f"({len(words_in_story)} words)."
+                        )
+                        return parsed
 
-                fallback_reason = (
-                    f"OpenAI returned an invalid word count: "
-                    f"{len(words_in_story)}"
-                )
-                print(f"[OpenAI Error] {fallback_reason}")
+                    fallback_reason = (
+                        f"OpenAI returned a story in the wrong language "
+                        f"(requested {language})"
+                    )
+                    print(f"[OpenAI Error] {fallback_reason}")
+                else:
+                    fallback_reason = (
+                        f"OpenAI returned an invalid word count: "
+                        f"{len(words_in_story)}"
+                    )
+                    print(f"[OpenAI Error] {fallback_reason}")
 
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
             fallback_reason = f"OpenAI response was malformed: {e}"
@@ -468,43 +498,51 @@ reasoning, or any text outside the JSON object.
                 words_in_story = story_text.split()
 
                 if 40 <= len(words_in_story) <= 100:
-                    sentences = [
-                        sentence.strip()
-                        for sentence in re.split(r"(?<=[.!?।])\s+", story_text.strip())
-                        if sentence.strip()
-                    ]
-                    parsed["sentences"] = sentences
-                    parsed["target_word_occurrences"] = [
-                        {
-                            "word": target,
-                            "occurrences_count": sum(
-                                sentence.lower().count(target.lower())
-                                for sentence in sentences
-                            ),
-                            "sentence_indices": [
-                                index
-                                for index, sentence in enumerate(sentences)
-                                if target.lower() in sentence.lower()
-                            ],
-                        }
-                        for target in target_words
-                    ]
-                    parsed["word_count"] = len(words_in_story)
-                    parsed["theme"] = theme
-                    parsed["grade_level"] = grade_level
-                    parsed["language"] = language
-                    parsed["generator_source"] = f"Groq {groq_model}"
-                    print(
-                        f"[Groq] Story generated with {groq_model} "
-                        f"({len(words_in_story)} words)."
-                    )
-                    return parsed
+                    if _story_matches_language(story_text, language):
+                        sentences = [
+                            sentence.strip()
+                            for sentence in re.split(r"(?<=[.!?।])\s+", story_text.strip())
+                            if sentence.strip()
+                        ]
+                        parsed["sentences"] = sentences
+                        parsed["target_word_occurrences"] = [
+                            {
+                                "word": target,
+                                "occurrences_count": sum(
+                                    sentence.lower().count(target.lower())
+                                    for sentence in sentences
+                                ),
+                                "sentence_indices": [
+                                    index
+                                    for index, sentence in enumerate(sentences)
+                                    if target.lower() in sentence.lower()
+                                ],
+                            }
+                            for target in target_words
+                        ]
+                        parsed["word_count"] = len(words_in_story)
+                        parsed["theme"] = theme
+                        parsed["grade_level"] = grade_level
+                        parsed["language"] = language
+                        parsed["generator_source"] = f"Groq {groq_model}"
+                        print(
+                            f"[Groq] Story generated with {groq_model} "
+                            f"({len(words_in_story)} words)."
+                        )
+                        return parsed
 
-                fallback_reason = (
-                    f"Groq returned an invalid word count: "
-                    f"{len(words_in_story)}"
-                )
-                print(f"[Groq Error] {fallback_reason}")
+                    fallback_reason = (
+                        f"Groq returned a story in the wrong language "
+                        f"(requested {language})"
+                    )
+                    print(f"[Groq Error] {fallback_reason}")
+
+                else:
+                    fallback_reason = (
+                        f"Groq returned an invalid word count: "
+                        f"{len(words_in_story)}"
+                    )
+                    print(f"[Groq Error] {fallback_reason}")
 
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as e:
             fallback_reason = f"Groq response was malformed: {e}"

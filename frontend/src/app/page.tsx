@@ -152,6 +152,7 @@ export default function Home() {
   const handleResetAll = () => {
     setSessionStage('BASELINE');
     setBaselineAnalysis(null);
+    setPriorityTargetWords([]);
     setLiveTranscript('');
     setIsBaselineModalOpen(false);
     setIsThemeModalOpen(false);
@@ -233,6 +234,13 @@ export default function Home() {
     let failureMessage = '';
     setIsGeneratingStory(true);
     try {
+      if (selectedPassage.language !== selectedLanguage) {
+        throw new Error('The selected passage language changed. Please choose the passage again before generating a story.');
+      }
+      if (baselineAnalysis?.language && baselineAnalysis.language !== selectedLanguage) {
+        throw new Error('The reading analysis language does not match the selected language. Please restart the reading step.');
+      }
+
       const targetWords = priorityTargetWords.map((tw) => tw.word);
 
       const res = await fetch('/api/rank-and-generate-remediation', {
@@ -297,7 +305,7 @@ export default function Home() {
         theme: generatedPassage?.theme || theme,
         grade_level: generatedPassage?.grade_level || selectedGrade,
         language: generatedPassage?.language || selectedLanguage,
-        generator_source: generatedPassage?.generator_source || 'AI',
+        generator_source: generatedPassage?.generator_source,
       };
 
       setRemediationPassage(normalizedPassage);

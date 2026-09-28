@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { PriorityTargetWord } from '@/types';
 import { Sparkles, Rocket, Compass, Trophy, PartyPopper, Loader2, Volume2, X } from 'lucide-react';
 
@@ -61,6 +61,8 @@ const THEMES = [
   }
 ];
 
+const defaultStudentName = (language: 'en' | 'hi') => language === 'hi' ? 'आरव' : 'Aarav';
+
 export const ThemeSelectorModal: React.FC<ThemeSelectorModalProps> = ({
   isOpen,
   onClose,
@@ -71,7 +73,16 @@ export const ThemeSelectorModal: React.FC<ThemeSelectorModalProps> = ({
   isGenerating,
 }) => {
   const [selectedTheme, setSelectedTheme] = useState('space');
-  const [studentName, setStudentName] = useState(language === 'hi' ? 'आरव' : 'Aarav');
+  const [studentName, setStudentName] = useState(defaultStudentName(language));
+  const previousLanguage = useRef(language);
+
+  useEffect(() => {
+    const previousDefault = defaultStudentName(previousLanguage.current);
+    setStudentName((currentName) =>
+      currentName === previousDefault ? defaultStudentName(language) : currentName
+    );
+    previousLanguage.current = language;
+  }, [language]);
 
   if (!isOpen) return null;
 

@@ -58,6 +58,11 @@ export const RemediationReadingCard: React.FC<RemediationReadingCardProps> = ({
             <h2 className="text-2xl font-black text-slate-900 mt-2">
               {passage.title}
             </h2>
+            <p className="text-xs text-slate-500 mt-1" data-testid="story-provenance">
+              Generated in {passage.language === 'hi' ? 'Hindi' : 'English'}
+              {' · '}
+              {passage.generator_source || 'Provider not reported'}
+            </p>
           </div>
 
           <div className="flex items-center gap-2 text-xs font-semibold text-indigo-700 bg-indigo-50 px-3 py-1.5 rounded-xl border border-indigo-100">

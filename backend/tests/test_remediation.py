@@ -1,10 +1,15 @@
 """
 Tests for error ranking, target word selection, and delta calculation.
 """
+import asyncio
+import json
+
+from app import remediation
 from app.remediation import (
     rank_and_select_target_words,
     calculate_remediation_delta,
     ERROR_SEVERITY_WEIGHTS,
+    _story_matches_language,
 )
 
 
@@ -18,6 +23,82 @@ SAMPLE_ERRORS = [
     {"word": "राम",    "spoken_word": "रामम",   "error_type": "SUBSTITUTION",
      "target_pattern": None,    "pause_before": 0.0, "in_stumble_cluster": False},
 ]
+
+
+class TestStoryLanguageValidation:
+    def test_accepts_english_and_hindi_for_matching_languages(self):
+        english = "A curious child explored the bright planet and returned home smiling. " * 8
+        hindi = "आरव अंतरिक्ष में चमकते तारों को देखकर बहुत खुश हुआ। " * 8
+
+        assert _story_matches_language(english, "en")
+        assert _story_matches_language(hindi, "hi")
+
+    def test_rejects_hindi_story_for_english_request(self):
+        hindi = "आरव अंतरिक्ष में चमकते तारों को देखकर बहुत खुश हुआ। " * 8
+
+        assert not _story_matches_language(hindi, "en")
+
+    def test_rejects_english_story_for_hindi_request(self):
+        english = "A curious child explored the bright planet and returned home smiling. " * 8
+
+        assert not _story_matches_language(english, "hi")
+
+    def test_tries_next_provider_after_gemini_returns_wrong_language(self, monkeypatch):
+        hindi = "आरव अंतरिक्ष में चमकते तारों को देखकर बहुत खुश हुआ। " * 8
+        english = "A curious child explored the bright planet and returned home smiling. " * 8
+        calls = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self.payload
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, **_kwargs):
+                calls.append(url)
+                if "generativelanguage.googleapis.com" in url:
+                    payload = {
+                        "candidates": [{"content": {"parts": [
+                            {"text": json.dumps({"title": "कहानी", "text": hindi})}
+                        ]}}]
+                    }
+                else:
+                    payload = {
+                        "output": [{"type": "message", "content": [{
+                            "type": "output_text",
+                            "text": json.dumps({"title": "A Starry Journey", "text": english}),
+                        }]}]
+                    }
+                return FakeResponse(payload)
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setattr(remediation.httpx, "AsyncClient", FakeClient)
+
+        result = asyncio.run(remediation.generate_remediation_story_gemini(
+            target_words=["stars"],
+            language="en",
+        ))
+
+        assert result["language"] == "en"
+        assert result["generator_source"].startswith("OpenAI ")
+        assert any("generativelanguage.googleapis.com" in url for url in calls)
+        assert "api.openai.com" in calls[-1]
 
 
 class TestRankAndSelectTargetWords:
